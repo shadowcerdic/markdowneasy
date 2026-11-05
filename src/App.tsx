@@ -811,7 +811,7 @@ export default function App() {
           {/* Editor Area (visible in 'split' or 'edit') */}
           {(viewMode === 'split' || viewMode === 'edit') && (
             <div
-              className={`flex-1 h-full overflow-hidden flex flex-col ${
+              className={`flex-1 h-full overflow-hidden flex flex-col no-print ${
                 viewMode === 'split' ? 'border-b md:border-b-0 md:border-r border-neutral-800/80' : ''
               }`}
             >
@@ -836,7 +836,7 @@ export default function App() {
 
           {/* Live Preview Area (visible in 'split' or 'preview') */}
           {(viewMode === 'split' || viewMode === 'preview') && (
-            <div className="flex-1 h-full overflow-hidden flex flex-col bg-neutral-950/20">
+            <div className="flex-1 h-full overflow-hidden flex flex-col bg-neutral-950/20 no-print">
               <PreviewArea
                 markdown={activeDoc.content}
                 directionMode={directionMode}

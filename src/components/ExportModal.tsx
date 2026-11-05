@@ -22,6 +22,7 @@ import {
   generatePlainText,
   copyRichTextToClipboard,
   exportToPdf,
+  sanitizeFilename,
 } from '../utils/exporter.ts';
 import { ThemeType } from './SettingsModal.tsx';
 import { calculateBidiStats } from '../utils/bidi.ts';
@@ -58,7 +59,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   const bidi = calculateBidiStats(content);
   const wordsCount = content.trim().split(/\s+/).filter(Boolean).length;
-  const sanitizedTitle = (title.trim() || 'Untitled').replace(/[^\w\s\u0600-\u06FF-]/gi, '_');
+  const sanitizedTitle = sanitizeFilename(title, 'Untitled');
 
   const triggerCopyFeedback = (formatName: string) => {
     setCopiedFormat(formatName);
@@ -102,15 +103,23 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const handleDirectPdfExport = async () => {
     setIsGeneratingPdf(true);
     try {
-      const ok = await exportToPdf(title, content, theme);
-      if (ok) {
+      const result = await exportToPdf(title, content, theme);
+      if (result === 'pdf') {
         triggerCopyFeedback('PDF file downloaded successfully!');
+      } else if (result === 'print') {
+        // The PDF engine failed (see exporter.ts) and the print dialog
+        // was opened instead — say so plainly, and point at Save as PDF.
+        triggerCopyFeedback(
+          'PDF engine could not render this document — the print dialog opened instead. Choose "Save as PDF" there.'
+        );
       } else {
-        triggerCopyFeedback('Print dialog triggered for PDF saving');
+        triggerCopyFeedback('PDF export failed. Try the Print button below instead.');
       }
     } catch (err) {
+      // No second window.print() here: exportToPdf already owns the
+      // fallback, and calling print again would open a second dialog.
       console.error('PDF export error:', err);
-      window.print();
+      triggerCopyFeedback('PDF export failed. Try the Print button below instead.');
     } finally {
       setIsGeneratingPdf(false);
     }

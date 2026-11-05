@@ -159,6 +159,42 @@ ul[dir="rtl"] li::marker {
     background: #ffffff !important;
     color: #111827 !important;
   }
+  /* The app shell is a fixed-height flex layout (h-screen,
+     overflow-hidden) whose theme container paints a dark background.
+     Without these resets the print preview shows the dark shell with
+     light text — and with "Background graphics" off (Chrome's default)
+     it looks like a blank white page. Force a plain white, flowing page
+     and let only the print-only preview render. */
+  html,
+  body,
+  #root,
+  #root > div {
+    background: #ffffff !important;
+  }
+  html,
+  body,
+  #root,
+  #root > div,
+  #root div {
+    height: auto !important;
+    overflow: visible !important;
+  }
+  #root > div {
+    display: block !important;
+  }
+  .markdown-body,
+  .markdown-body * {
+    color: #111827 !important;
+    background: transparent !important;
+    border-color: #d1d5db !important;
+  }
+  .markdown-body a {
+    color: #1d4ed8 !important;
+  }
+  .markdown-body pre,
+  .markdown-body code {
+    background: #f3f4f6 !important;
+  }
   .no-print {
     display: none !important;
   }
