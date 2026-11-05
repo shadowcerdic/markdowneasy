@@ -292,8 +292,28 @@ export function generatePlainText(markdown: string): string {
 }
 
 /**
+ * Render the document title for the PDF header. The header sits in an
+ * RTL context, so a Latin run in parentheses — "(Literary Journal)" —
+ * has its brackets mirrored to ")Literary Journal(": neutral brackets
+ * between RTL and LTR text take the paragraph direction. Wrap each
+ * maximal non-Arabic run in <span dir="ltr"> so the brackets keep
+ * their LTR direction. Runs are escaped before wrapping.
+ */
+function renderPdfTitle(title: string): string {
+  const raw = title.trim() || 'Untitled Document';
+  return raw
+    .split(/([\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]+)/g)
+    .map((part) => {
+      if (!part) return '';
+      const escaped = escapeHtml(part);
+      return /[\u0600-\u06FF]/.test(part) ? escaped : `<span dir="ltr">${escaped}</span>`;
+    })
+    .join('');
+}
+
+/**
  * Direct client-side PDF generation:
- * 1. Creates an off-screen, high-res HTML container with Vazirmatn fonts, BiDi layout, and print CSS
+ * 1. Creates an in-flow, high-res HTML container with Vazirmatn fonts, BiDi layout, and print CSS
  * 2. Uses html2pdf.js to render and trigger a direct file download of the PDF
  * 3. Falls back gracefully to print dialog / iframe if html2canvas/html2pdf encounters restrictions
  *
@@ -344,12 +364,44 @@ export async function exportToPdf(title: string, markdown: string, theme: string
   // ☐/☑ glyphs and buttons (code-block "Copy") are dropped.
   const contentHost = document.createElement('div');
   contentHost.innerHTML = renderedContent;
+  // Headings carry a hover-only "#" anchor (opacity-0 in the live
+  // preview). Class-stripping below removes the opacity-0, so the "#"
+  // would print at full opacity in front of every heading — drop the
+  // anchors here, while their class still identifies them.
+  contentHost.querySelectorAll('a[aria-label="Link to heading"]').forEach((a) => a.remove());
   contentHost.querySelectorAll('input[type="checkbox"]').forEach((input) => {
     const box = document.createElement('span');
     box.textContent = (input as HTMLInputElement).checked ? '☑ ' : '☐ ';
     input.replaceWith(box);
   });
   contentHost.querySelectorAll('button').forEach((button) => button.remove());
+  // html2canvas renders ::marker wrong for RTL lists (".1" on the left
+  // instead of "۱." on the right — the live preview isolates markers via
+  // `li::marker { direction: ltr; unicode-bidi: isolate }` and Persian
+  // digits from lang=fa, neither of which html2canvas implements).
+  // Replace markers with inline text and disable list markers in the
+  // PDF stylesheet below; task lists keep only their ☐/☑ glyphs.
+  const persianDigits = '۰۱۲۳۴۵۶۷۸۹';
+  const toPersianDigits = (n: number) =>
+    String(n)
+      .split('')
+      .map((d) => persianDigits[Number(d)])
+      .join('');
+  contentHost.querySelectorAll('ol, ul').forEach((list) => {
+    const isTask = list.classList.contains('task-list');
+    const isOrdered = list.tagName === 'OL';
+    const listDir = list.getAttribute('dir') || 'ltr';
+    Array.from(list.children).forEach((li, idx) => {
+      if (li.tagName !== 'LI' || isTask) return;
+      const marker = document.createElement('span');
+      marker.textContent = isOrdered
+        ? listDir === 'rtl'
+          ? `${toPersianDigits(idx + 1)}. `
+          : `${idx + 1}. `
+        : '• ';
+      li.insertBefore(marker, li.firstChild);
+    });
+  });
   contentHost.querySelectorAll('*').forEach((el) => {
     el.removeAttribute('class');
     el.removeAttribute('style');
@@ -373,6 +425,9 @@ export async function exportToPdf(title: string, markdown: string, theme: string
       #omnimark-pdf-render-root td { border: 1px solid #d1d5db; padding: 0.625rem 1rem; }
       #omnimark-pdf-render-root th { background-color: #f9fafb; }
       #omnimark-pdf-render-root hr { border-color: #d1d5db; }
+      #omnimark-pdf-render-root ol,
+      #omnimark-pdf-render-root ul { list-style: none; margin: 0.75rem 0; padding-inline-start: 1.5rem; }
+      #omnimark-pdf-render-root li { margin: 0.375rem 0; }
     </style>
   `;
 
@@ -380,7 +435,7 @@ export async function exportToPdf(title: string, markdown: string, theme: string
     ${pdfStyles}
     <div style="font-family: ${fontFam}; direction: ${docDir}; text-align: ${docDir === 'rtl' ? 'right' : 'left'}; line-height: 1.8; color: #111827;">
       <div style="margin-bottom: 24px; padding-bottom: 14px; border-bottom: 2px solid #e5e7eb;">
-        <h1 style="font-size: 24pt; margin: 0 0 6px 0; font-weight: 800; color: #0f172a; font-family: ${fontFam};">${escapeHtml(title || 'Untitled Document')}</h1>
+        <h1 style="font-size: 24pt; margin: 0 0 6px 0; font-weight: 800; color: #0f172a; font-family: ${fontFam};">${renderPdfTitle(title)}</h1>
         <div style="font-size: 9pt; color: #64748b; font-family: ${fontFam};">OmniMark Premium BiDi Export · Font: Vazirmatn (وزیرمتن) · ${new Date().toLocaleDateString()}</div>
       </div>
       <div style="font-family: ${fontFam}; font-size: 11pt;">
