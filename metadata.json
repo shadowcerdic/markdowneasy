@@ -1,0 +1,6 @@
+{
+  "name": "OmniMark - Premium BiDi Markdown Editor",
+  "description": "A high-performance markdown editor with intelligent auto-direction (RTL/LTR), live synchronized preview, focus mode, and multi-document workspace.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

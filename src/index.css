@@ -1,0 +1,159 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-serif: 'Lora', Georgia, Cambria, serif;
+    --font-mono: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    --font-arabic: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-persian: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(150, 150, 150, 0.2);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(150, 150, 150, 0.35);
+}
+
+/* BiDi and Auto-Direction: Mandate Vazirmatn for Persian and Arabic */
+[dir="rtl"],
+.font-vazirmatn,
+.font-arabic,
+.font-persian {
+  text-align: right;
+  direction: rtl;
+  font-family: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+
+[dir="rtl"] h1,
+[dir="rtl"] h2,
+[dir="rtl"] h3,
+[dir="rtl"] h4,
+[dir="rtl"] h5,
+[dir="rtl"] h6,
+[dir="rtl"] p,
+[dir="rtl"] li,
+[dir="rtl"] td,
+[dir="rtl"] th,
+[dir="rtl"] blockquote,
+[dir="rtl"] span {
+  font-family: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+
+[dir="ltr"] {
+  text-align: left;
+  direction: ltr;
+}
+
+[dir="auto"] {
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+
+/* Ensure code blocks and inline code remain LTR even inside RTL paragraphs */
+[dir="rtl"] pre,
+[dir="rtl"] code,
+[dir="rtl"] .code-font,
+[dir="rtl"] kbd {
+  direction: ltr !important;
+  text-align: left !important;
+  unicode-bidi: isolate;
+  display: inline-block;
+}
+
+/* Markdown preview prose styling */
+.markdown-body {
+  line-height: 1.75;
+  word-break: break-word;
+}
+
+.markdown-body blockquote {
+  position: relative;
+}
+
+[dir="rtl"] .markdown-body blockquote {
+  border-right-width: 4px;
+  border-left-width: 0;
+  padding-right: 1.25rem;
+  padding-left: 0;
+}
+
+[dir="ltr"] .markdown-body blockquote {
+  border-left-width: 4px;
+  border-right-width: 0;
+  padding-left: 1.25rem;
+  padding-right: 0;
+}
+
+/* Table styling */
+.markdown-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1.25rem 0;
+}
+
+.markdown-body th,
+.markdown-body td {
+  padding: 0.625rem 1rem;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1));
+}
+
+/* Focus Mode spotlight effect */
+.focus-mode-active .focus-paragraph {
+  transition: opacity 0.25s ease;
+  opacity: 0.25;
+}
+.focus-mode-active .focus-paragraph:hover,
+.focus-mode-active .focus-paragraph.is-active-line {
+  opacity: 1;
+}
+
+/* Print / PDF generation rules */
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #111827 !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  .print-content {
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+  }
+  .markdown-body {
+    color: #111827 !important;
+  }
+  .markdown-body th,
+  .markdown-body td {
+    border-color: #d1d5db !important;
+    color: #111827 !important;
+  }
+  .markdown-body pre {
+    border: 1px solid #e5e7eb !important;
+    background-color: #f9fafb !important;
+    color: #111827 !important;
+    page-break-inside: avoid;
+  }
+  h1, h2, h3 {
+    page-break-after: avoid;
+    color: #111827 !important;
+  }
+}
