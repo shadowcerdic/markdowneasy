@@ -13,6 +13,23 @@ import { parseMarkdownToHtml, escapeHtml } from './markdownParser.ts';
 import { calculateBidiStats } from './bidi.ts';
 import { extractTags } from './tags.ts';
 
+/**
+ * Filenames for downloads must be ASCII: Chromium falls back to the bare
+ * name "download" (no extension) when the `download` attribute contains
+ * non-ASCII characters (verified 2026-11-05 in headless Chrome: "سلام.pdf"
+ * and "دلیل محرر.pdf" both saved as "download", while ASCII names kept
+ * theirs). Persian titles are the norm here, so keep the ASCII remainder
+ * of the title and fall back to a dated generic name when nothing ASCII
+ * is left. Used by every export path (PDF, HTML, Markdown, text).
+ */
+export function sanitizeFilename(title: string, fallback = 'document'): string {
+  const ascii = (title.trim() || '')
+    .replace(/[^\w\s-]/g, '_')
+    .replace(/[\s_]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return ascii || `${fallback}-${new Date().toISOString().slice(0, 10)}`;
+}
+
 export function downloadFile(filename: string, content: string, contentType: string = 'text/plain') {
   const blob = new Blob([content], { type: contentType });
   const url = URL.createObjectURL(blob);
@@ -279,37 +296,95 @@ export function generatePlainText(markdown: string): string {
  * 1. Creates an off-screen, high-res HTML container with Vazirmatn fonts, BiDi layout, and print CSS
  * 2. Uses html2pdf.js to render and trigger a direct file download of the PDF
  * 3. Falls back gracefully to print dialog / iframe if html2canvas/html2pdf encounters restrictions
+ *
+ * Returns 'pdf' when a file was actually downloaded, 'print' when the
+ * engine failed and the print dialog was opened instead, and 'failed'
+ * when even that was not possible. Callers must not report success on
+ * anything but 'pdf' — the old boolean return let the modal claim
+ * "PDF file downloaded successfully!" when no PDF existed.
  */
-export async function exportToPdf(title: string, markdown: string, theme: string = 'slate'): Promise<boolean> {
+export async function exportToPdf(title: string, markdown: string, theme: string = 'slate'): Promise<'pdf' | 'print' | 'failed'> {
   const renderedContent = parseMarkdownToHtml(markdown);
   const bidiStats = calculateBidiStats(markdown);
   const docDir = bidiStats.dominantDirection;
-  const sanitizedTitle = (title.trim() || 'Document').replace(/[^\w\s\u0600-\u06FF-]/gi, '_');
+  const sanitizedTitle = sanitizeFilename(title, 'Document');
 
-  // Create temporary container
+  // Create temporary container. It MUST stay in normal document flow:
+  // html2pdf's toContainer() clones the source into a hidden overlay,
+  // and a source positioned off-screen (fixed/absolute at -9999px in
+  // either direction) clones to a zero-height canvas — the render
+  // "succeeds" and produces a blank white PDF page. So the container
+  // is appended in-flow at the end of <body> (below the h-screen app,
+  // invisible behind the open Export modal) and body scrolling is
+  // locked while it renders; both are restored in the finally block.
   const container = document.createElement('div');
   container.id = 'omnimark-pdf-render-root';
-  container.style.position = 'fixed';
-  container.style.left = '-9999px';
-  container.style.top = '0';
-  container.style.width = '794px'; // Standard A4 width at 96 DPI
+  // Width MUST be the PDF's inner width, not A4 width: html2pdf renders
+  // through jsPDF's context2d, whose backing canvas is the printable
+  // area (A4 210mm minus 12mm margins = 186mm ≈ 703px at 96dpi), and
+  // it draws the render 1:1 — a 794px container gets its right ~90px
+  // cropped off the page (verified visually 2026-11-05).
+  container.style.width = '703px'; // A4 printable width at 96 DPI
+  container.style.margin = '0 auto';
   container.style.padding = '40px';
   container.style.backgroundColor = '#ffffff';
   container.style.color = '#111827';
   container.style.boxSizing = 'border-box';
-  container.style.zIndex = '-1000';
   container.setAttribute('dir', docDir);
+
+  const previousBodyOverflow = document.body.style.overflow;
+  document.body.style.overflow = 'hidden';
 
   const fontFam = "'Vazirmatn', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
 
+  // Two layers against html2canvas's oklch blindness (see the onclone
+  // note below): the app's stylesheet is stripped from the render clone,
+  // and the content itself is de-classed so no Tailwind utility can
+  // match anything even if a stylesheet survives. Checkboxes become
+  // ☐/☑ glyphs and buttons (code-block "Copy") are dropped.
+  const contentHost = document.createElement('div');
+  contentHost.innerHTML = renderedContent;
+  contentHost.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    const box = document.createElement('span');
+    box.textContent = (input as HTMLInputElement).checked ? '☑ ' : '☐ ';
+    input.replaceWith(box);
+  });
+  contentHost.querySelectorAll('button').forEach((button) => button.remove());
+  contentHost.querySelectorAll('*').forEach((el) => {
+    el.removeAttribute('class');
+    el.removeAttribute('style');
+  });
+  const cleanContent = contentHost.innerHTML;
+
+  // Plain element selectors in hex — no classes, so no Tailwind utility
+  // can match anything inside the container.
+  const pdfStyles = `
+    <style>
+      #omnimark-pdf-render-root * { color: #111827; }
+      #omnimark-pdf-render-root a { color: #1d4ed8; }
+      #omnimark-pdf-render-root h1,
+      #omnimark-pdf-render-root h2,
+      #omnimark-pdf-render-root h3 { color: #0f172a; }
+      #omnimark-pdf-render-root pre,
+      #omnimark-pdf-render-root code { background-color: #f3f4f6; color: #111827; }
+      #omnimark-pdf-render-root blockquote { border-inline-start: 4px solid #6366f1; padding-inline-start: 1.25rem; }
+      #omnimark-pdf-render-root table { border-collapse: collapse; width: 100%; margin: 1.25rem 0; }
+      #omnimark-pdf-render-root th,
+      #omnimark-pdf-render-root td { border: 1px solid #d1d5db; padding: 0.625rem 1rem; }
+      #omnimark-pdf-render-root th { background-color: #f9fafb; }
+      #omnimark-pdf-render-root hr { border-color: #d1d5db; }
+    </style>
+  `;
+
   container.innerHTML = `
+    ${pdfStyles}
     <div style="font-family: ${fontFam}; direction: ${docDir}; text-align: ${docDir === 'rtl' ? 'right' : 'left'}; line-height: 1.8; color: #111827;">
       <div style="margin-bottom: 24px; padding-bottom: 14px; border-bottom: 2px solid #e5e7eb;">
         <h1 style="font-size: 24pt; margin: 0 0 6px 0; font-weight: 800; color: #0f172a; font-family: ${fontFam};">${escapeHtml(title || 'Untitled Document')}</h1>
         <div style="font-size: 9pt; color: #64748b; font-family: ${fontFam};">OmniMark Premium BiDi Export · Font: Vazirmatn (وزیرمتن) · ${new Date().toLocaleDateString()}</div>
       </div>
-      <div class="markdown-body" style="font-family: ${fontFam}; font-size: 11pt;">
-        ${renderedContent}
+      <div style="font-family: ${fontFam}; font-size: 11pt;">
+        ${cleanContent}
       </div>
     </div>
   `;
@@ -333,25 +408,44 @@ export async function exportToPdf(title: string, markdown: string, theme: string
         useCORS: false,
         letterRendering: true,
         logging: false,
+        // html2canvas parses the document's stylesheets and throws on the
+        // FIRST oklch()/color-mix() value it meets — and Tailwind v4's
+        // stylesheet is full of them, so even a plain "hello" div failed
+        // to render (bisected 2026-11-05: V1 trivial div FAILs, V5 with
+        // stylesheets removed from the clone OKs). onclone strips the
+        // app's stylesheet <link> from html2canvas's hidden clone only —
+        // the visible page is untouched. The Google Fonts link is kept
+        // (it is @font-face only, no oklch) so Vazirmatn still renders.
+        // The container's own <style> block below survives the strip
+        // and supplies all PDF styling in plain hex.
+        onclone: (clonedDoc: Document) => {
+          clonedDoc.querySelectorAll('link[rel="stylesheet"]').forEach((el) => {
+            const link = el as HTMLLinkElement;
+            if (!link.href.includes('fonts.googleapis.com')) {
+              link.remove();
+            }
+          });
+        },
       },
       jsPDF: { unit: 'mm' as const, format: 'a4' as const, orientation: 'portrait' as const },
       pagebreak: { mode: ['avoid-all', 'css', 'legacy'] },
     };
 
     await html2pdf().set(opt).from(container).save();
-    return true;
+    return 'pdf';
   } catch (err) {
     console.warn('html2pdf failed, attempting print fallback:', err);
     // Fallback: trigger standard browser print dialog
     try {
       window.print();
-      return true;
+      return 'print';
     } catch {
-      return false;
+      return 'failed';
     }
   } finally {
     if (document.body.contains(container)) {
       document.body.removeChild(container);
     }
+    document.body.style.overflow = previousBodyOverflow;
   }
 }
