@@ -5,10 +5,18 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    // Relative base: the production build works under any subpath
+    // (GitHub Pages /markdowneasy/, Cloudflare Pages, any static host)
+    // with no config change. Absolute asset URLs would break under a
+    // subpath; dev server and `vite preview` are unaffected.
+    base: './',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        // import.meta.dirname, not __dirname: __dirname is undefined in
+        // ESM and Vite's native config loader warns it is unsupported
+        // (it only worked because Vite shimmed it).
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     server: {

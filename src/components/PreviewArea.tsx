@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo } from 'react';
-import mermaid from 'mermaid';
+import DOMPurify from 'dompurify';
 import { parseMarkdownToHtml } from '../utils/markdownParser.ts';
 import { FontType, WidthType } from './SettingsModal.tsx';
 
@@ -24,8 +24,13 @@ export const PreviewArea: React.FC<PreviewAreaProps> = ({
   onOpenWikiLink,
   previewRef,
 }) => {
+  // Defence in depth: the parser escapes text and allowlists URLs, but
+  // this HTML still lands in dangerouslySetInnerHTML below. DOMPurify is
+  // the second layer — a future parser bug must not become stored XSS.
+  // data-* attributes (task index, code copy, wiki target) are kept.
   const renderedHtml = useMemo(() => {
-    return parseMarkdownToHtml(markdown, { globalDirection: directionMode });
+    const raw = parseMarkdownToHtml(markdown, { globalDirection: directionMode });
+    return DOMPurify.sanitize(raw, { ADD_ATTR: ['target'] });
   }, [markdown, directionMode]);
 
   // Width classes
@@ -46,27 +51,38 @@ export const PreviewArea: React.FC<PreviewAreaProps> = ({
       ? 'font-serif'
       : 'font-sans';
 
-  // Render Mermaid diagrams
+  // Render Mermaid diagrams. Mermaid is dynamically imported so its
+  // ~2 MB of diagram chunks are not in the initial bundle, and it runs
+  // under securityLevel 'strict': 'loose' disabled Mermaid's own
+  // sanitisation and enabled `click` directives, so a diagram label could
+  // carry HTML / javascript: links straight into the preview.
   useEffect(() => {
-    try {
-      mermaid.initialize({
-        startOnLoad: false,
-        theme: 'dark',
-        securityLevel: 'loose',
-        fontFamily: 'Vazirmatn, Inter, sans-serif',
-      });
-      // Small tick to ensure elements are mounted in DOM
-      const timer = setTimeout(() => {
-        mermaid.run({
-          querySelector: '.mermaid',
-        }).catch(() => {
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      // Don't pay the ~2 MB Mermaid download at all unless this document
+      // actually contains a diagram.
+      if (!previewRef.current?.querySelector('.mermaid')) return;
+      import('mermaid')
+        .then((mod) => {
+          if (cancelled) return;
+          const mermaid = mod.default;
+          mermaid.initialize({
+            startOnLoad: false,
+            theme: 'dark',
+            securityLevel: 'strict',
+            maxTextSize: 50000,
+            fontFamily: 'Vazirmatn, Inter, sans-serif',
+          });
+          return mermaid.run({ querySelector: '.mermaid' });
+        })
+        .catch(() => {
           // Ignore invalid diagram syntax errors quietly
         });
-      }, 50);
-      return () => clearTimeout(timer);
-    } catch {
-      // ignore
-    }
+    }, 50);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [renderedHtml]);
 
   // Attach interactive click listeners for task checkboxes, wiki links, and code copy

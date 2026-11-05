@@ -9,7 +9,7 @@
  * - Formatted Print / PDF
  */
 
-import { parseMarkdownToHtml } from './markdownParser.ts';
+import { parseMarkdownToHtml, escapeHtml } from './markdownParser.ts';
 import { calculateBidiStats } from './bidi.ts';
 import { extractTags } from './tags.ts';
 
@@ -37,7 +37,7 @@ export async function copyRichTextToClipboard(title: string, markdown: string, t
   // Inlined styles for maximum compatibility with Word & Google Docs
   const styledHtml = `
     <div style="direction: ${docDir}; text-align: ${docDir === 'rtl' ? 'right' : 'left'}; font-family: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.8; color: #1e293b;">
-      <h1 style="font-size: 24pt; margin-bottom: 12pt; font-weight: bold; border-bottom: 2px solid #e2e8f0; padding-bottom: 6pt;">${title}</h1>
+      <h1 style="font-size: 24pt; margin-bottom: 12pt; font-weight: bold; border-bottom: 2px solid #e2e8f0; padding-bottom: 6pt;">${escapeHtml(title)}</h1>
       ${renderedHtml}
     </div>
   `;
@@ -92,11 +92,12 @@ export function generateStandaloneHtml(title: string, markdown: string, theme: s
   const borderColor = theme === 'paper' ? '#ddd5c5' : theme === 'minimal' ? '#e4e4e7' : '#1e293b';
 
   return `<!DOCTYPE html>
-<html lang="en" dir="${docDir}">
+<html lang="${docDir === 'rtl' ? 'fa' : 'en'}" dir="${docDir}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${title || 'Exported Document - OmniMark'}</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https: data:; object-src 'none'; base-uri 'self'">
+  <title>${escapeHtml(title || 'Exported Document - OmniMark')}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Inter:wght@400;500;600;700&family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -209,7 +210,7 @@ export function generateStandaloneHtml(title: string, markdown: string, theme: s
 </head>
 <body>
   <header style="margin-bottom: 2.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border);">
-    <h1 style="margin: 0 0 0.5rem 0;">${title}</h1>
+    <h1 style="margin: 0 0 0.5rem 0;">${escapeHtml(title)}</h1>
     <div style="font-size: 0.85em; opacity: 0.7;">Exported from OmniMark · Font: Vazirmatn (وزیرمتن)</div>
   </header>
   <main class="markdown-body">
@@ -235,7 +236,9 @@ export function generateCleanMarkdown(
 
   const frontmatter = [
     '---',
-    `title: "${title.replace(/"/g, '\\"')}"`,
+    // Escape backslashes before quotes and strip CR/LF: a title with a
+    // newline previously broke out of the YAML string (frontmatter injection).
+    `title: "${title.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]/g, ' ')}"`,
     `date: "${dateStr}"`,
     `direction: "${bidi.dominantDirection}"`,
     tags.length > 0 ? `tags: [${tags.map((t) => `"${t}"`).join(', ')}]` : null,
@@ -302,7 +305,7 @@ export async function exportToPdf(title: string, markdown: string, theme: string
   container.innerHTML = `
     <div style="font-family: ${fontFam}; direction: ${docDir}; text-align: ${docDir === 'rtl' ? 'right' : 'left'}; line-height: 1.8; color: #111827;">
       <div style="margin-bottom: 24px; padding-bottom: 14px; border-bottom: 2px solid #e5e7eb;">
-        <h1 style="font-size: 24pt; margin: 0 0 6px 0; font-weight: 800; color: #0f172a; font-family: ${fontFam};">${title || 'Untitled Document'}</h1>
+        <h1 style="font-size: 24pt; margin: 0 0 6px 0; font-weight: 800; color: #0f172a; font-family: ${fontFam};">${escapeHtml(title || 'Untitled Document')}</h1>
         <div style="font-size: 9pt; color: #64748b; font-family: ${fontFam};">OmniMark Premium BiDi Export · Font: Vazirmatn (وزیرمتن) · ${new Date().toLocaleDateString()}</div>
       </div>
       <div class="markdown-body" style="font-family: ${fontFam}; font-size: 11pt;">
@@ -324,7 +327,10 @@ export async function exportToPdf(title: string, markdown: string, theme: string
       image: { type: 'jpeg' as const, quality: 0.98 },
       html2canvas: {
         scale: 2,
-        useCORS: true,
+        // useCORS:true made the victim's browser fetch arbitrary remote
+        // images from a pasted document (intranet/tracking URLs) and embed
+        // them in the PDF. Same-origin/data images render without it.
+        useCORS: false,
         letterRendering: true,
         logging: false,
       },

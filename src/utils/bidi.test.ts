@@ -12,6 +12,7 @@ import {
   extractOutline,
 } from './markdownStats.ts';
 import {
+  parseInlineMarkdown,
   parseMarkdownToHtml,
   toggleTaskInMarkdown,
 } from './markdownParser.ts';
@@ -143,4 +144,104 @@ test('parseMarkdownToHtml handles Mermaid diagrams', () => {
   const html = parseMarkdownToHtml(doc);
   assert.ok(html.includes('Mermaid Diagram'));
   assert.ok(html.includes('mermaid'));
+});
+
+// --- Regression tests for the deep-audit fixes (2026-11-05) ---
+
+test('detectDirection: Persian digits and diacritics are neutral, not strong RTL', () => {
+  // Persian/Arabic-Indic digits must be skipped, like Latin digits are.
+  assert.equal(detectDirection('۱۲۳ Hello world'), 'ltr');
+  assert.equal(detectDirection('١٢٣ Hello'), 'ltr');
+  assert.equal(detectDirection('123 سلام دنیا'), 'rtl');
+  // Leading diacritic alone must not decide direction.
+  assert.equal(detectDirection('ًHello'), 'ltr');
+  // Persian-specific letters (ی ک پ چ ژ گ) are strong RTL.
+  assert.equal(detectDirection('می‌خواهم بروم'), 'rtl');
+  assert.equal(detectDirection('پژوهش ژنتیک'), 'rtl');
+  // Scripts the old LTR range omitted are LTR, not RTL-by-default.
+  assert.equal(detectDirection('ภาษาไทย سلام'), 'ltr');
+  assert.equal(detectDirection('Հայերեն سلام'), 'ltr');
+});
+
+test('detectMarkdownLineDirection ignores inline code, links and URLs', () => {
+  assert.equal(detectMarkdownLineDirection('`code` سلام دنیا'), 'rtl');
+  // Bold markers are stripped, so the visible Persian text decides.
+  assert.equal(detectMarkdownLineDirection('**سلام** Hello'), 'rtl');
+  assert.equal(detectMarkdownLineDirection('https://example.com سلام'), 'rtl');
+  assert.equal(detectMarkdownLineDirection('[سلام](https://example.com) دنیا'), 'rtl');
+  assert.equal(detectMarkdownLineDirection('#tag سلام دنیا'), 'rtl');
+});
+
+test('calculateBidiStats reports 0/0 when there are no strong characters', () => {
+  const stats = calculateBidiStats('12345 !!!');
+  assert.equal(stats.rtlPercentage, 0);
+  assert.equal(stats.ltrPercentage, 0);
+});
+
+test('parseMarkdownToHtml: javascript: and data:text/html links are neutralised', () => {
+  const html = parseMarkdownToHtml('[click me](javascript:alert(1))');
+  assert.ok(!html.includes('javascript:'));
+  assert.ok(html.includes('href="#"'));
+
+  const html2 = parseMarkdownToHtml('[x](data:text/html,<script>alert(1)</script>)');
+  assert.ok(!html2.includes('data:text/html'));
+
+  const ok = parseMarkdownToHtml('[real](https://example.com) [mail](mailto:a@b.c)');
+  assert.ok(ok.includes('href="https://example.com"'));
+  assert.ok(ok.includes('href="mailto:a@b.c"'));
+});
+
+test('parseMarkdownToHtml: fenced-code language cannot break out of markup', () => {
+  const html = parseMarkdownToHtml('```<img src=x onerror=alert(1)>\ncode\n```');
+  assert.ok(!html.includes('<img src=x'));
+  assert.ok(!html.includes('onerror'));
+  assert.ok(html.includes('language-text'));
+});
+
+test('parseMarkdownToHtml: inline code is not rewritten by bold/link rules', () => {
+  const html = parseMarkdownToHtml('Use `**not bold**` and `[not a link](https://x.test)` here.');
+  assert.ok(html.includes('<code'), 'code span present');
+  assert.ok(!html.includes('<strong>not bold</strong>'));
+  assert.ok(!html.includes('href="https://x.test"'));
+});
+
+test('parseMarkdownToHtml: duplicate headings get unique ids', () => {
+  const html = parseMarkdownToHtml('# Title\n\n# Title\n\n# Title');
+  assert.ok(html.includes('id="title"'));
+  assert.ok(html.includes('id="title-2"'));
+  assert.ok(html.includes('id="title-3"'));
+});
+
+test('parseMarkdownToHtml: ordered list container carries the list direction', () => {
+  const html = parseMarkdownToHtml('1. اول\n2. دوم\n3. سوم');
+  assert.ok(html.includes('<ol dir="rtl"'));
+  const htmlEn = parseMarkdownToHtml('1. first\n2. second');
+  assert.ok(htmlEn.includes('<ol dir="ltr"'));
+});
+
+test('parseInlineMarkdown: underscores in a link URL do not pair with target="_blank" as italic', () => {
+  const html = parseInlineMarkdown('[wiki](https://en.wikipedia.org/wiki/Some_Page) and _real italic_');
+  assert.ok(html.includes('href="https://en.wikipedia.org/wiki/Some_Page"'));
+  assert.ok(html.includes('target="_blank"'));
+  assert.ok(!html.includes('target="</em>'));
+  assert.ok(html.includes('<em class="italic text-neutral-200">real italic</em>'));
+});
+
+test('parseMarkdownToHtml: URLs with parentheses parse fully, no leftover fragments', () => {
+  const html = parseMarkdownToHtml('[wiki](https://en.wikipedia.org/wiki/X_(disambiguation))');
+  assert.ok(html.includes('href="https://en.wikipedia.org/wiki/X_(disambiguation)"'));
+  assert.ok(!html.includes('(disambiguation))'));
+
+  const evil = parseMarkdownToHtml('![evil](data:text/html,<script>alert(1)</script>)');
+  assert.ok(!evil.includes('</script>'));
+  assert.ok(!evil.includes('alert(1)'));
+  assert.ok(evil.includes('src="#"'));
+});
+
+test('parseMarkdownToHtml: consecutive tasks form one list', () => {
+  const html = parseMarkdownToHtml('- [ ] one\n- [x] two\n- [ ] three');
+  assert.ok(html.includes('<ul class="task-list'));
+  assert.equal((html.match(/<li/g) || []).length, 3);
+  assert.ok(html.includes('data-task-index="0"'));
+  assert.ok(html.includes('data-task-index="2"'));
 });

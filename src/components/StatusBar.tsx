@@ -78,10 +78,18 @@ export const StatusBar: React.FC<StatusBarProps> = ({
 
         <span className="w-px h-3 bg-neutral-800"></span>
 
-        {/* Auto-save status */}
-        <div className="flex items-center gap-1 text-emerald-400/90 font-mono">
+        {/* Auto-save status: lastSavedAt was received but never rendered —
+            the footer always said "Auto-saved" even after a failed write.
+            It now shows the time of the last *successful* write. */}
+        <div
+          className="flex items-center gap-1 text-emerald-400/90 font-mono"
+          title={`Last saved ${new Date(lastSavedAt).toLocaleTimeString()}`}
+          aria-live="polite"
+        >
           <Check className="w-3 h-3" />
-          <span className="hidden sm:inline">Auto-saved</span>
+          <span className="hidden sm:inline">
+            Saved {new Date(lastSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          </span>
         </div>
 
         <span className="w-px h-3 bg-neutral-800 hidden md:block"></span>
