@@ -2,6 +2,8 @@
  * Obsidian-style Wiki-Link Parser and Knowledge Graph Builder
  */
 
+import { escapeHtml } from './markdownParser.ts';
+
 export interface GraphNode {
   id: string;
   title: string;
@@ -61,11 +63,15 @@ export function replaceWikiLinks(
       ? 'text-indigo-400 hover:text-indigo-300 font-semibold border-b border-indigo-500/50 hover:border-indigo-400'
       : 'text-amber-400/80 hover:text-amber-300 underline decoration-dashed';
 
+    // The label and title are interpolated into HTML: escape both. The old
+    // code put the raw target into title="..." (a `"` broke out of the
+    // attribute) and the raw label into element content.
+    const safeTitle = escapeHtml(exists ? `Open document: ${target}` : `Document not found: ${target}`);
     return `<a href="#wiki:${encodeURIComponent(
       target
     )}" class="wiki-link-target inline-flex items-center gap-1 cursor-pointer transition-colors ${statusClass}" data-wiki-doc="${encodeURIComponent(
       target
-    )}" title="${exists ? `Open document: ${target}` : `Document not found: ${target}`}"><span class="opacity-60 text-xs">⟦</span>${label}<span class="opacity-60 text-xs">⟧</span></a>`;
+    )}" title="${safeTitle}"><span class="opacity-60 text-xs">⟦</span>${escapeHtml(label)}<span class="opacity-60 text-xs">⟧</span></a>`;
   });
 }
 

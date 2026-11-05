@@ -11,7 +11,7 @@ export interface ParseOptions {
   enableTasks?: boolean;
 }
 
-function escapeHtml(str: string): string {
+export function escapeHtml(str: string): string {
   return str
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -21,30 +21,138 @@ function escapeHtml(str: string): string {
 }
 
 /**
+ * URL allowlist for href/src attributes interpolated into HTML.
+ * `escapeHtml` alone cannot stop `javascript:` / `data:text/html` links:
+ * the scheme survives entity-escaping and executes on click. Only these
+ * schemes (plus relative URLs and fragment links) are rendered; anything
+ * else degrades to "#" so a malicious pasted document cannot phish or
+ * execute code from the preview. Images additionally allow same-type
+ * raster data: URIs (SVG data: URIs can carry scripts, so they are out).
+ */
+export function safeUrl(rawUrl: string, allowDataImages = false): string {
+  const url = rawUrl.trim();
+  if (url.startsWith('#') || url.startsWith('/') || url.startsWith('./') || url.startsWith('../')) {
+    return url;
+  }
+  const lower = url.toLowerCase();
+  if (
+    lower.startsWith('http://') ||
+    lower.startsWith('https://') ||
+    lower.startsWith('mailto:')
+  ) {
+    return url;
+  }
+  if (allowDataImages && /^data:image\/(png|jpeg|gif|webp);base64,/i.test(url)) {
+    return url;
+  }
+  return '#';
+}
+
+/**
+ * Fenced-code language label allowlist. The label is interpolated into
+ * markup (`<span>${lang}</span>`, `class="language-${lang}"`), so a raw
+ * fence like ```<img src=x onerror=...> was stored XSS. Only a
+ * token-shaped language survives; anything else falls back to "text".
+ */
+function safeLanguage(rawLang: string): string {
+  const lang = rawLang.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9+#.-]*$/.test(lang) ? lang : 'text';
+}
+
+/**
+ * Links & images with balanced-paren destinations. A naive `\(([^)]+)\)`
+ * stops at the FIRST ")" — so a legit Wikipedia URL with parens, or a
+ * hostile `data:text/html,<script>alert(1)</script>` URL, left a visible
+ * "</script>)" fragment in the preview. Scan the parens properly.
+ *
+ * Generated tags are NOT inlined directly: they go through `stash`, which
+ * replaces them with a placeholder until the very end of
+ * parseInlineMarkdown. Otherwise the bold/italic passes below would
+ * rewrite underscores inside generated attributes — e.g. the `_` in a
+ * Wikipedia URL paired with the `_` in `target="_blank"` and produced
+ * `<a href="...X<em>(disambiguation)" target="</em>blank"...>`.
+ */
+function replaceLinksAndImages(text: string, stash: (html: string) => string): string {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const open = text.indexOf('[', i);
+    if (open === -1) {
+      out += text.slice(i);
+      break;
+    }
+    const isImage = open > 0 && text[open - 1] === '!';
+    const closeBracket = text.indexOf(']', open + 1);
+    if (closeBracket === -1 || text[closeBracket + 1] !== '(' || (!isImage && closeBracket === open + 1)) {
+      out += text.slice(i, open + 1);
+      i = open + 1;
+      continue;
+    }
+    let depth = 1;
+    let j = closeBracket + 2;
+    while (j < text.length && depth > 0) {
+      if (text[j] === '(') depth++;
+      else if (text[j] === ')') depth--;
+      j++;
+    }
+    if (depth !== 0) {
+      // Unterminated destination: leave it literal.
+      out += text.slice(i, open + 1);
+      i = open + 1;
+      continue;
+    }
+    const label = text.slice(open + 1, closeBracket);
+    const url = text.slice(closeBracket + 2, j - 1);
+    if (isImage) {
+      out += text.slice(i, open - 1); // drop the '!'
+      out += stash(
+        `<img src="${safeUrl(url, true)}" alt="${label}" class="rounded-xl border border-neutral-700/50 my-3 max-w-full shadow-md object-cover hover:opacity-95 transition-opacity" loading="lazy" />`
+      );
+    } else {
+      out += text.slice(i, open);
+      out += stash(
+        `<a href="${safeUrl(url)}" target="_blank" rel="noopener noreferrer" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-4 font-medium transition-colors">${label}</a>`
+      );
+    }
+    i = j;
+  }
+  return out;
+}
+
+/**
  * Parses inline markdown: bold, italic, strikethrough, highlight, code, math, links, images, sub/sup.
  */
 export function parseInlineMarkdown(text: string): string {
-  let result = escapeHtml(text);
+  // Every piece of generated HTML (code spans, math, links, images) is
+  // stashed behind a placeholder until the very end. Otherwise the
+  // bold/italic passes below rewrite markdown *inside* generated tags:
+  // `**x**` became bold inside <code>, and the `_` in a Wikipedia URL
+  // paired with the `_` in target="_blank" and broke the link entirely.
+  const htmlParts: string[] = [];
+  const stash = (html: string): string => {
+    htmlParts.push(html);
+    return `\u0000${htmlParts.length - 1}\u0000`;
+  };
 
-  // Math inline: $expression$
+  // Extract inline code spans FIRST: otherwise the bold/italic/link
+  // regexes below rewrite markdown *inside* code spans.
+  let result = escapeHtml(text).replace(/`([^`]+)`/g, (_match, code) => {
+    return stash(
+      `<code class="px-1.5 py-0.5 rounded-md bg-neutral-800 border border-neutral-700/60 font-mono text-xs text-amber-300 font-medium inline-block" dir="ltr">${code}</code>`
+    );
+  });
+
+  // Math inline: $expression$ (stashed: an expr like $a_b + c_d$ must not
+  // be rewritten by the italic pass).
   result = result.replace(/\$([^\$\n]+)\$/g, (_match, expr) => {
-    return `<span class="inline-math px-1.5 py-0.5 rounded bg-indigo-950/40 border border-indigo-500/20 text-indigo-300 font-mono text-xs select-all" dir="ltr">LaTeX: ${expr}</span>`;
+    return stash(
+      `<span class="inline-math px-1.5 py-0.5 rounded bg-indigo-950/40 border border-indigo-500/20 text-indigo-300 font-mono text-xs select-all" dir="ltr">LaTeX: ${expr}</span>`
+    );
   });
 
-  // Images: ![alt](url)
-  result = result.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, alt, url) => {
-    return `<img src="${url}" alt="${alt}" class="rounded-xl border border-neutral-700/50 my-3 max-w-full shadow-md object-cover hover:opacity-95 transition-opacity" loading="lazy" />`;
-  });
-
-  // Links: [text](url)
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, url) => {
-    return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-4 font-medium transition-colors">${label}</a>`;
-  });
-
-  // Inline Code: `code` (always forced LTR)
-  result = result.replace(/`([^`]+)`/g, (_match, code) => {
-    return `<code class="px-1.5 py-0.5 rounded-md bg-neutral-800 border border-neutral-700/60 font-mono text-xs text-amber-300 font-medium inline-block" dir="ltr">${code}</code>`;
-  });
+  // Images & links: ![alt](url) / [text](url) — URL scheme-allowlisted
+  // (see safeUrl) and destinations parsed with balanced parens.
+  result = replaceLinksAndImages(result, stash);
 
   // Highlight: ==text==
   result = result.replace(/==([^=]+)==/g, '<mark class="bg-amber-400/25 text-amber-200 px-1 py-0.5 rounded border-b border-amber-400/50">$1</mark>');
@@ -83,6 +191,12 @@ export function parseInlineMarkdown(text: string): string {
     return `${prefix}<span class="inline-tag px-1.5 py-0.5 rounded bg-neutral-800/80 border border-neutral-700/60 text-indigo-300 font-mono text-xs hover:border-indigo-500/50 transition-colors cursor-pointer" data-tag="${tag}">#${tag}</span>`;
   });
 
+  // Restore all stashed HTML (code spans, math, links, images),
+  // untouched by the inline-formatting passes above.
+  if (htmlParts.length > 0) {
+    result = result.replace(/\u0000(\d+)\u0000/g, (_match, idx) => htmlParts[Number(idx)] ?? '');
+  }
+
   return result;
 }
 
@@ -110,6 +224,7 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
   
   let i = 0;
   let taskIndex = 0;
+  const usedSlugs = new Set<string>();
 
   while (i < lines.length) {
     const line = lines[i];
@@ -125,7 +240,7 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
     if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
       const fenceMatch = trimmed.match(/^(`{3,}|~{3,})(.*)$/);
       const fenceMarker = fenceMatch ? fenceMatch[1] : '```';
-      const lang = fenceMatch && fenceMatch[2] ? fenceMatch[2].trim() : 'text';
+      const lang = safeLanguage(fenceMatch && fenceMatch[2] ? fenceMatch[2].trim() : 'text');
       
       i++;
       const codeLines: string[] = [];
@@ -260,7 +375,7 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
       const dir = resolveBlockDirection(quoteContent, globalDir);
       
       htmlBlocks.push(`
-        <blockquote class="my-4 border-indigo-500/60 bg-neutral-900/40 p-4 rounded-r-lg italic text-neutral-300" dir="${dir}">
+        <blockquote class="my-4 border-s-4 border-indigo-500/60 bg-neutral-900/40 p-4 rounded-s-lg italic text-neutral-300" dir="${dir}">
           ${parseInlineMarkdown(quoteContent)}
         </blockquote>
       `);
@@ -273,10 +388,17 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
       const level = headingMatch[1].length;
       const headingText = headingMatch[2].trim();
       const dir = resolveBlockDirection(headingText, globalDir);
-      const slug = headingText
-        .toLowerCase()
-        .replace(/[^\p{L}\p{N}\s-]/gu, '')
-        .replace(/\s+/g, '-') || `heading-${i}`;
+      const baseSlug =
+        headingText
+          .toLowerCase()
+          .replace(/[^\p{L}\p{N}\s-]/gu, '')
+          .replace(/\s+/g, '-') || `heading-${i}`;
+      // Duplicate headings must not share an id: the outline's
+      // querySelector(`#slug`) would always land on the first one.
+      let slug = baseSlug;
+      let suffix = 2;
+      while (usedSlugs.has(slug)) slug = `${baseSlug}-${suffix++}`;
+      usedSlugs.add(slug);
 
       const sizes = [
         'text-3xl sm:text-4xl font-extrabold pb-3 border-b border-neutral-800 text-neutral-100 tracking-tight mt-8 mb-4',
@@ -345,7 +467,7 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
         headers.forEach((h, idx) => {
           const align = alignments[idx] || 'left';
           const alignClass = align === 'center' ? 'text-center' : (align === 'right' ? 'text-right' : 'text-left');
-          tableHtml += `<th class="px-4 py-3 ${alignClass}">${parseInlineMarkdown(h)}</th>`;
+          tableHtml += `<th dir="${detectDirection(h)}" class="px-4 py-3 ${alignClass}">${parseInlineMarkdown(h)}</th>`;
         });
         tableHtml += `</tr></thead><tbody class="divide-y divide-neutral-800/60 bg-neutral-950/50">`;
 
@@ -355,7 +477,7 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
           cells.forEach((cell, idx) => {
             const align = alignments[idx] || 'left';
             const alignClass = align === 'center' ? 'text-center' : (align === 'right' ? 'text-right' : 'text-left');
-            tableHtml += `<td class="px-4 py-3 ${alignClass}">${parseInlineMarkdown(cell)}</td>`;
+            tableHtml += `<td dir="${detectDirection(cell)}" class="px-4 py-3 ${alignClass}">${parseInlineMarkdown(cell)}</td>`;
           });
           tableHtml += `</tr>`;
         });
@@ -366,29 +488,42 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
       }
     }
 
-    // Task List Items (- [ ] or - [x])
+    // Task List Items (- [ ] or - [x]) — consecutive tasks are grouped
+    // into one <ul> (previously each task was a bare <div>, so screen
+    // readers saw no list and tasks could not be styled as one).
     const taskMatch = line.match(/^(\s*)[-*+]\s*\[([ xX])\]\s*(.*)$/);
     if (taskMatch) {
-      const isChecked = taskMatch[2].toLowerCase() === 'x';
-      const taskText = taskMatch[3];
-      const dir = resolveBlockDirection(taskText, globalDir);
-      const currentTaskIndex = taskIndex++;
-
-      htmlBlocks.push(`
-        <div class="flex items-start gap-3 my-2 group pl-1 cursor-pointer" dir="${dir}">
-          <input 
-            type="checkbox" 
-            ${isChecked ? 'checked' : ''} 
-            data-task-index="${currentTaskIndex}"
-            aria-label="Toggle task ${escapeHtml(taskText)}"
+      const tasks: { checked: boolean; text: string; dir: 'rtl' | 'ltr'; index: number }[] = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^(\s*)[-*+]\s*\[([ xX])\]\s*(.*)$/);
+        if (!m) break;
+        const taskText = m[3];
+        tasks.push({
+          checked: m[2].toLowerCase() === 'x',
+          text: taskText,
+          dir: resolveBlockDirection(taskText, globalDir),
+          index: taskIndex++,
+        });
+        i++;
+      }
+      const taskItems = tasks
+        .map(
+          (t) => `
+        <li class="flex items-start gap-3 my-2 group ps-1 cursor-pointer" dir="${t.dir}">
+          <input
+            type="checkbox"
+            ${t.checked ? 'checked' : ''}
+            data-task-index="${t.index}"
+            aria-label="Toggle task ${escapeHtml(t.text)}"
             class="interactive-task-cb mt-1 w-4 h-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500 focus:ring-indigo-400 focus:ring-offset-0 cursor-pointer accent-indigo-500"
           />
-          <span class="text-sm leading-relaxed ${isChecked ? 'line-through text-neutral-500' : 'text-neutral-200'}">
-            ${parseInlineMarkdown(taskText)}
+          <span class="text-sm leading-relaxed ${t.checked ? 'line-through text-neutral-500' : 'text-neutral-200'}">
+            ${parseInlineMarkdown(t.text)}
           </span>
-        </div>
-      `);
-      i++;
+        </li>`
+        )
+        .join('\n');
+      htmlBlocks.push(`<ul class="task-list my-2 list-none ps-0">${taskItems}\n</ul>`);
       continue;
     }
 
@@ -419,8 +554,14 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
 
       const listTag = isOrdered ? 'ol' : 'ul';
       const listClass = isOrdered ? 'list-decimal' : 'list-disc';
+      // The container itself needs a direction: with no dir on <ol>/<ul>
+      // it inherits LTR from <html>, so RTL items get their markers on the
+      // wrong side and the number+dot run reorders (". 1" instead of "1.").
+      // Majority direction of the items wins; each <li> keeps its own dir.
+      const rtlCount = listItems.filter((item) => item.dir === 'rtl').length;
+      const listDir = rtlCount * 2 > listItems.length ? 'rtl' : 'ltr';
 
-      let listHtml = `<${listTag} class="${listClass} my-3 space-y-1.5 px-6 text-sm text-neutral-200">`;
+      let listHtml = `<${listTag} dir="${listDir}" class="${listClass} my-3 space-y-1.5 ps-6 text-sm text-neutral-200">`;
       listItems.forEach(item => {
         listHtml += `<li dir="${item.dir}" class="leading-relaxed">${parseInlineMarkdown(item.text)}</li>`;
       });

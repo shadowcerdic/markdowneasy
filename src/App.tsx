@@ -37,20 +37,73 @@ const STORAGE_KEYS = {
   SNAPSHOTS: 'omnimark_snapshots_v1',
 };
 
+/**
+ * localStorage is untrusted input: a truncated write, a browser extension,
+ * or a hand-edited value can leave a corrupt payload behind. The old code
+ * accepted any array and crashed later (content: 42 -> content.split()).
+ * Invalid entries are dropped; a wholly corrupt key is quarantined so the
+ * app starts from defaults instead of white-screening.
+ */
+function isValidDocument(value: unknown): value is DocumentItem {
+  if (typeof value !== 'object' || value === null) return false;
+  const doc = value as Record<string, unknown>;
+  return (
+    typeof doc.id === 'string' &&
+    typeof doc.title === 'string' &&
+    typeof doc.content === 'string' &&
+    typeof doc.updatedAt === 'number'
+  );
+}
+
+function loadDocuments(): DocumentItem[] {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEYS.DOCUMENTS);
+    if (!saved) return DEFAULT_DOCUMENTS;
+    const parsed: unknown = JSON.parse(saved);
+    if (!Array.isArray(parsed)) return DEFAULT_DOCUMENTS;
+    const valid = parsed.filter(isValidDocument);
+    // Quarantine the corrupt key instead of re-saving over it blindly:
+    // keep the valid docs, drop the broken entries.
+    if (valid.length !== parsed.length) {
+      try {
+        localStorage.setItem(STORAGE_KEYS.DOCUMENTS, JSON.stringify(valid));
+      } catch {
+        // Quota/full storage: the in-memory docs are still usable.
+      }
+    }
+    return valid.length > 0 ? valid : DEFAULT_DOCUMENTS;
+  } catch {
+    return DEFAULT_DOCUMENTS;
+  }
+}
+
+function isValidSnapshot(value: unknown): value is DocumentSnapshot {
+  if (typeof value !== 'object' || value === null) return false;
+  const snap = value as Record<string, unknown>;
+  return (
+    typeof snap.id === 'string' &&
+    typeof snap.docId === 'string' &&
+    typeof snap.name === 'string' &&
+    typeof snap.content === 'string' &&
+    typeof snap.timestamp === 'number'
+  );
+}
+
+function loadSnapshots(): DocumentSnapshot[] {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEYS.SNAPSHOTS);
+    if (!saved) return [];
+    const parsed: unknown = JSON.parse(saved);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isValidSnapshot);
+  } catch {
+    return [];
+  }
+}
+
 export default function App() {
   // Load persisted documents
-  const [documents, setDocuments] = useState<DocumentItem[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.DOCUMENTS);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {
-      // fallback
-    }
-    return DEFAULT_DOCUMENTS;
-  });
+  const [documents, setDocuments] = useState<DocumentItem[]>(loadDocuments);
 
   const [activeDocId, setActiveDocId] = useState<string>(() => {
     try {
@@ -96,18 +149,7 @@ export default function App() {
   });
 
   // Version revision snapshots
-  const [snapshots, setSnapshots] = useState<DocumentSnapshot[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS.SNAPSHOTS);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {
-      // fallback
-    }
-    return [];
-  });
+  const [snapshots, setSnapshots] = useState<DocumentSnapshot[]>(loadSnapshots);
 
   // Selected tag filter (Bear style)
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
@@ -139,19 +181,84 @@ export default function App() {
   // Refs for scrolling and textarea manipulation
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
+  // Hoisted: the print-only PreviewArea used useRef(null) inline in JSX,
+  // a Rules-of-Hooks violation that also gave it a fresh, dead ref on
+  // every render (its click delegation attached to nothing).
+  const printPreviewRef = useRef<HTMLDivElement | null>(null);
 
   // Active Document
   const activeDoc = documents.find((d) => d.id === activeDocId) || documents[0] || DEFAULT_DOCUMENTS[0];
 
-  // Save documents to localStorage
-  useEffect(() => {
+  // Debounced persistence: the old code JSON.stringify'd the whole
+  // workspace and wrote localStorage synchronously on EVERY keystroke
+  // (main-thread jank on large docs, QuotaExceededError at ~5 MB), and
+  // only console.warn'd on failure while the UI kept showing "Auto-saved".
+  // Writes now flush 500 ms after the last change, on tab hide, and on
+  // page unload; lastSavedAt only advances on a successful write.
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const persistTimerRef = useRef<number | null>(null);
+  const documentsRef = useRef(documents);
+  documentsRef.current = documents;
+  const activeDocIdRef = useRef(activeDocId);
+  activeDocIdRef.current = activeDocId;
+
+  const flushPersist = useCallback((): boolean => {
     try {
-      localStorage.setItem(STORAGE_KEYS.DOCUMENTS, JSON.stringify(documents));
-      localStorage.setItem(STORAGE_KEYS.ACTIVE_DOC_ID, activeDocId);
+      localStorage.setItem(STORAGE_KEYS.DOCUMENTS, JSON.stringify(documentsRef.current));
+      localStorage.setItem(STORAGE_KEYS.ACTIVE_DOC_ID, activeDocIdRef.current);
+      setLastSavedAt(Date.now());
+      setSaveError(null);
+      return true;
     } catch (e) {
       console.warn('Failed to persist documents to localStorage', e);
+      setSaveError(
+        'Could not save — browser storage is full or unavailable. Download a backup from Export Hub.'
+      );
+      return false;
     }
-  }, [documents, activeDocId]);
+  }, []);
+
+  const schedulePersist = useCallback(() => {
+    if (persistTimerRef.current !== null) {
+      window.clearTimeout(persistTimerRef.current);
+    }
+    persistTimerRef.current = window.setTimeout(() => {
+      persistTimerRef.current = null;
+      flushPersist();
+    }, 500);
+  }, [flushPersist]);
+
+  // Save documents to localStorage (debounced; see flushPersist)
+  useEffect(() => {
+    schedulePersist();
+    return () => {
+      if (persistTimerRef.current !== null) {
+        window.clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+      }
+    };
+  }, [documents, activeDocId, schedulePersist]);
+
+  // Flush pending writes before the page is hidden or unloaded, so the
+  // last 500 ms of typing is never lost when the tab closes.
+  useEffect(() => {
+    const flush = () => {
+      if (persistTimerRef.current !== null) {
+        window.clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+        flushPersist();
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('beforeunload', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [flushPersist]);
 
   // Persist snapshots
   useEffect(() => {
@@ -164,12 +271,18 @@ export default function App() {
 
   // Persist preferences
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.THEME, theme);
-    localStorage.setItem(STORAGE_KEYS.FONT, font);
-    localStorage.setItem(STORAGE_KEYS.FONT_SIZE, fontSize.toString());
-    localStorage.setItem(STORAGE_KEYS.DIRECTION_MODE, directionMode);
-    localStorage.setItem(STORAGE_KEYS.EDITOR_WIDTH, editorWidth);
-    localStorage.setItem(STORAGE_KEYS.TARGET_WORDS, targetWords.toString());
+    try {
+      localStorage.setItem(STORAGE_KEYS.THEME, theme);
+      localStorage.setItem(STORAGE_KEYS.FONT, font);
+      localStorage.setItem(STORAGE_KEYS.FONT_SIZE, fontSize.toString());
+      localStorage.setItem(STORAGE_KEYS.DIRECTION_MODE, directionMode);
+      localStorage.setItem(STORAGE_KEYS.EDITOR_WIDTH, editorWidth);
+      localStorage.setItem(STORAGE_KEYS.TARGET_WORDS, targetWords.toString());
+    } catch (e) {
+      // The old code had no try/catch here at all: a quota throw killed
+      // the effect chain. Preferences are non-critical; warn and continue.
+      console.warn('Failed to persist preferences to localStorage', e);
+    }
   }, [theme, font, fontSize, directionMode, editorWidth, targetWords]);
 
   // Update document content
@@ -196,7 +309,9 @@ export default function App() {
           return doc;
         })
       );
-      setLastSavedAt(Date.now());
+      // NOTE: lastSavedAt is intentionally NOT set here. It advances only
+      // on a successful localStorage write (flushPersist); setting it per
+      // keystroke made the UI claim "Auto-saved" even when saving failed.
     },
     [activeDocId]
   );
@@ -230,6 +345,11 @@ export default function App() {
 
   const handleDeleteDoc = (id: string) => {
     if (documents.length <= 1) return;
+    const target = documents.find((d) => d.id === id);
+    // Deleting a document was one click with no confirm and no undo.
+    if (!window.confirm(`Delete "${target?.title ?? 'this document'}"? This cannot be undone.`)) {
+      return;
+    }
     const remaining = documents.filter((d) => d.id !== id);
     setDocuments(remaining);
     if (activeDocId === id) {
@@ -244,7 +364,21 @@ export default function App() {
   };
 
   const handleImportFile = (file: File) => {
+    // The old code readAsText'd any dropped file of any size — the delivery
+    // channel for a malicious .md, and an unbounded read into localStorage.
+    const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+    if (!/\.(md|markdown|txt)$/i.test(file.name)) {
+      setSaveError(`"${file.name}" is not a Markdown/text file (.md, .markdown, .txt).`);
+      return;
+    }
+    if (file.size > MAX_IMPORT_BYTES) {
+      setSaveError(`"${file.name}" is too large to import (limit 5 MB).`);
+      return;
+    }
     const reader = new FileReader();
+    reader.onerror = () => {
+      setSaveError(`Could not read "${file.name}".`);
+    };
     reader.onload = (e) => {
       const content = (e.target?.result as string) || '';
       const title = file.name.replace(/\.(md|markdown|txt)$/i, '');
@@ -275,8 +409,8 @@ export default function App() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDraggingOver(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleImportFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      Array.from(e.dataTransfer.files).forEach(handleImportFile);
     }
   };
 
@@ -396,7 +530,9 @@ export default function App() {
       setViewMode('split');
     }
     setTimeout(() => {
-      const targetEl = previewRef.current?.querySelector(`#${slug}`);
+      // CSS.escape: a slug starting with a digit ("123-things") makes
+      // querySelector('#123-things') throw instead of scrolling.
+      const targetEl = previewRef.current?.querySelector(`#${CSS.escape(slug)}`);
       if (targetEl) {
         targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
@@ -411,7 +547,9 @@ export default function App() {
         findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
         caseSensitive ? '' : 'i'
       );
-      const updated = activeDoc.content.replace(regex, replaceText);
+      // Replacer function, not a replacement string: a replaceText
+      // containing $&, $' or $` used to inject the matched text.
+      const updated = activeDoc.content.replace(regex, () => replaceText);
       handleContentChange(updated);
     } catch {
       // ignore regex error
@@ -425,7 +563,7 @@ export default function App() {
         findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
         caseSensitive ? 'g' : 'gi'
       );
-      const updated = activeDoc.content.replace(regex, replaceText);
+      const updated = activeDoc.content.replace(regex, () => replaceText);
       handleContentChange(updated);
     } catch {
       // ignore regex error
@@ -460,10 +598,17 @@ export default function App() {
   // Keyboard shortcuts
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      // Ctrl+S or Cmd+S
+      // Ctrl+S or Cmd+S — actually flush the pending debounced write.
+      // The old handler only stamped lastSavedAt, saving nothing.
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
-        setLastSavedAt(Date.now());
+        flushPersist();
+      }
+      // Ctrl+E: Inline Code (the toolbar tooltip advertised this shortcut,
+      // but no handler existed for it)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') {
+        e.preventDefault();
+        handleInsertMarkdown('`', '`', 'code');
       }
       // Ctrl+B: Bold
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b' && !e.shiftKey) {
@@ -603,10 +748,35 @@ export default function App() {
           onHighlightMatches={() => {}}
         />
 
+        {/* Save / import failure banner. Previously a failed write only
+            console.warn'd while the header kept showing a green "Auto-saved"
+            dot, so data loss was invisible. */}
+        {saveError && (
+          <div
+            role="alert"
+            className="px-5 py-2 bg-rose-950/80 border-b border-rose-500/40 text-rose-200 text-xs flex items-center justify-between gap-3 no-print"
+          >
+            <span>{saveError}</span>
+            <button
+              type="button"
+              onClick={() => setSaveError(null)}
+              aria-label="Dismiss error"
+              className="shrink-0 rounded px-2 py-0.5 hover:bg-rose-900 text-rose-100 font-bold"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
         {/* Modern Document Header Bar */}
         <div className="px-5 py-2.5 border-b border-white/5 bg-neutral-900/60 backdrop-blur-md flex items-center justify-between no-print select-none">
           <div className="flex items-center gap-3 flex-1 min-w-0">
-            <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400/50 shrink-0" title="Auto-saved" />
+            <div
+              className={`w-2.5 h-2.5 rounded-full shadow-sm shrink-0 ${
+                saveError ? 'bg-rose-400 shadow-rose-400/50' : 'bg-emerald-400 shadow-emerald-400/50'
+              }`}
+              title={saveError ? 'Save failed' : 'Auto-saved'}
+            />
             <input
               type="text"
               value={activeDoc.title}
@@ -690,7 +860,7 @@ export default function App() {
               editorWidth="standard"
               onToggleTask={handleToggleTask}
               onOpenWikiLink={handleOpenWikiLink}
-              previewRef={useRef(null)}
+              previewRef={printPreviewRef}
             />
           </div>
         </div>

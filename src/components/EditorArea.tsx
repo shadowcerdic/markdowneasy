@@ -40,11 +40,12 @@ export const EditorArea: React.FC<EditorAreaProps> = ({
       ? detectMarkdownLineDirection(activeLineText)
       : directionMode;
 
-  // Determine font styling: mandate Vazirmatn for Persian and Arabic text
+  // Determine font styling from the USER's font setting only. The old
+  // code switched the whole textarea to Vazirmatn whenever the active line
+  // was RTL, overriding an explicit mono/serif choice — font is not
+  // direction (see index.css).
   const fontClass =
-    activeLineDirection === 'rtl'
-      ? 'font-vazirmatn'
-      : font === 'mono'
+    font === 'mono'
       ? 'font-mono'
       : font === 'arabic'
       ? 'font-vazirmatn'
@@ -111,11 +112,39 @@ export const EditorArea: React.FC<EditorAreaProps> = ({
       '`': '`',
     };
 
+    // Typing a closing character right where one was auto-inserted just
+    // moves past it (old code inserted a second one: () became ()).
+    const closers = [')', ']', '}', '"', "'", '`'];
+    if (
+      closers.includes(e.key) &&
+      textarea.selectionStart === textarea.selectionEnd &&
+      content[textarea.selectionStart] === e.key
+    ) {
+      e.preventDefault();
+      const pos = textarea.selectionStart + 1;
+      setTimeout(() => {
+        textarea.selectionStart = pos;
+        textarea.selectionEnd = pos;
+      }, 0);
+      return;
+    }
+
     if (pairs[e.key]) {
       const start = textarea.selectionStart;
       const end = textarea.selectionEnd;
       const selected = content.substring(start, end);
       const closeChar = pairs[e.key];
+
+      // Don't auto-pair a quote straight after a word character: typing
+      // don't / l'amour inserted a stray second quote every time.
+      if (
+        !selected &&
+        (e.key === '"' || e.key === "'") &&
+        start > 0 &&
+        /[\p{L}\p{N}]/u.test(content[start - 1])
+      ) {
+        return; // let the quote insert normally
+      }
 
       e.preventDefault();
       const updated =
@@ -189,11 +218,15 @@ export const EditorArea: React.FC<EditorAreaProps> = ({
         let prefix = listMatch[0];
         // Increment ordered list
         const numMatch = currentLine.match(/^(\s*)(\d+)\.\s+/);
+        const taskMatch = currentLine.match(/^(\s*)[-*+]\s*\[[ xX]\]\s+/);
         if (numMatch) {
           const nextNum = parseInt(numMatch[2], 10) + 1;
           prefix = `${numMatch[1]}${nextNum}. `;
-        } else if (prefix.includes('[- [x]]') || prefix.includes('- [ ]')) {
-          prefix = '- [ ] ';
+        } else if (taskMatch) {
+          // A new task is always unchecked. The old check compared against
+          // the literal '[- [x]]', which can never occur, so `- [x] done`
+          // continued as another checked task.
+          prefix = `${taskMatch[1]}- [ ] `;
         }
 
         const updated =
@@ -219,7 +252,7 @@ export const EditorArea: React.FC<EditorAreaProps> = ({
         ref={gutterRef}
         aria-hidden="true"
         className="w-12 sm:w-14 shrink-0 py-6 pr-3 pl-2 text-right font-mono text-xs select-none overflow-hidden text-neutral-600 border-r border-neutral-800/60 bg-neutral-950/40 no-print"
-        style={{ fontSize: `${Math.max(11, fontSize - 3)}px`, lineHeight: 1.6 }}
+        style={{ fontSize: `${Math.max(11, fontSize - 3)}px`, lineHeight: `${fontSize * 1.6}px` }}
       >
         {Array.from({ length: lineCount }).map((_, i) => (
           <div
@@ -245,7 +278,13 @@ export const EditorArea: React.FC<EditorAreaProps> = ({
           onKeyUp={handleCursorMovement}
           onClick={handleCursorMovement}
           onScroll={handleScroll}
-          dir={activeLineDirection}
+          // dir="auto": the old code flipped the WHOLE textarea (every
+          // line, caret, scroll) to the cursor line's direction, so moving
+          // between a Persian and an English line reflowed the document.
+          // A single textarea cannot be per-line; auto lets the browser
+          // use the first strong character of the whole value, which is
+          // stable while typing.
+          dir="auto"
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"

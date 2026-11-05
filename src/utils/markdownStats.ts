@@ -2,6 +2,8 @@
  * Markdown Statistics and Outline Extraction Engine
  */
 
+import { detectDirection } from './bidi.ts';
+
 export interface MarkdownStats {
   words: number;
   characters: number;
@@ -103,15 +105,18 @@ export function extractOutline(markdown: string): OutlineItem[] {
         .replace(/[^\p{L}\p{N}\s-]/gu, '')
         .replace(/\s+/g, '-') || `heading-${index}`;
 
-      // Determine outline item direction
-      const isRtl = /[\u0591-\u07FF\uFB1D-\uFDFD\uFE70-\uFEFC\u08A0-\u08FF]/.test(cleanText);
+      // Determine outline item direction with the same first-strong rule
+      // the parser uses. The old code marked a heading RTL if it contained
+      // ANY RTL char, so "Hello سلام" was rtl in the outline but ltr in
+      // the preview — and clicking it could miss its target.
+      const direction = detectDirection(cleanText);
 
       outline.push({
         id: slug,
         level,
         text: cleanText,
         lineNumber: index + 1,
-        direction: isRtl ? 'rtl' : 'ltr',
+        direction,
       });
     }
   });

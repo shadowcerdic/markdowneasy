@@ -26,14 +26,20 @@
   background: rgba(150, 150, 150, 0.35);
 }
 
-/* BiDi and Auto-Direction: Mandate Vazirmatn for Persian and Arabic */
-[dir="rtl"],
+/* BiDi and Auto-Direction: Vazirmatn for Persian and Arabic.
+   Font and direction are separate concerns: giving an element the
+   Vazirmatn font must NOT flip it to RTL (the old combined rule made
+   every English document with font="arabic" — and the title input —
+   right-to-left). Direction comes only from [dir="rtl"]. */
 .font-vazirmatn,
 .font-arabic,
 .font-persian {
+  font-family: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+
+[dir="rtl"] {
   text-align: right;
   direction: rtl;
-  font-family: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
 }
 
 [dir="rtl"] h1,
@@ -46,9 +52,18 @@
 [dir="rtl"] li,
 [dir="rtl"] td,
 [dir="rtl"] th,
-[dir="rtl"] blockquote,
-[dir="rtl"] span {
+[dir="rtl"] blockquote {
   font-family: 'Vazirmatn', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+
+/* ...except spans that are explicitly monospace (inline code / math /
+   tags): the old rule forced Vazirmatn onto every [dir="rtl"] span,
+   including the font-mono ones the parser emits. */
+[dir="rtl"] code,
+[dir="rtl"] .font-mono,
+[dir="rtl"] .inline-math,
+[dir="rtl"] .inline-tag {
+  font-family: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
 }
 
 [dir="ltr"] {
@@ -61,15 +76,34 @@
   text-align: start;
 }
 
-/* Ensure code blocks and inline code remain LTR even inside RTL paragraphs */
+/* Ensure code blocks and inline code remain LTR even inside RTL paragraphs.
+   Inline <code> stays inline: the old rule forced display:inline-block on
+   it, breaking baselines and line-height inside RTL paragraphs. */
 [dir="rtl"] pre,
-[dir="rtl"] code,
-[dir="rtl"] .code-font,
 [dir="rtl"] kbd {
   direction: ltr !important;
   text-align: left !important;
   unicode-bidi: isolate;
-  display: inline-block;
+}
+
+[dir="rtl"] code {
+  direction: ltr !important;
+  text-align: left !important;
+  unicode-bidi: isolate;
+}
+
+/* RTL lists: logical padding + isolated markers. Without this, an <ol>
+   with dir="rtl" lets the bidi algorithm reorder the "1." marker run
+   (". 1" instead of "1."). */
+[dir="rtl"] ol,
+[dir="rtl"] ul {
+  padding-inline-start: 1.5rem;
+}
+
+ol[dir="rtl"] li::marker,
+ul[dir="rtl"] li::marker {
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 
 /* Markdown preview prose styling */
@@ -82,18 +116,18 @@
   position: relative;
 }
 
-[dir="rtl"] .markdown-body blockquote {
-  border-right-width: 4px;
-  border-left-width: 0;
-  padding-right: 1.25rem;
-  padding-left: 0;
+/* Blockquote side bar: logical properties, matched on the blockquote's
+   OWN dir attribute. The old selectors ([dir="rtl"] .markdown-body
+   blockquote) required an RTL ancestor that never exists — the parser
+   puts dir on the <blockquote> itself — so no quote bar ever rendered. */
+.markdown-body blockquote[dir="rtl"] {
+  border-inline-start: 4px solid var(--border-color, rgba(99, 102, 241, 0.6));
+  padding-inline-start: 1.25rem;
 }
 
-[dir="ltr"] .markdown-body blockquote {
-  border-left-width: 4px;
-  border-right-width: 0;
-  padding-left: 1.25rem;
-  padding-right: 0;
+.markdown-body blockquote[dir="ltr"] {
+  border-inline-start: 4px solid var(--border-color, rgba(99, 102, 241, 0.6));
+  padding-inline-start: 1.25rem;
 }
 
 /* Table styling */
@@ -155,5 +189,37 @@
   h1, h2, h3 {
     page-break-after: avoid;
     color: #111827 !important;
+  }
+}
+
+/* animate-fadeIn is used by ~17 elements (modals, drawers, toasts) but
+   no keyframes existed anywhere, so the class was a silent no-op. */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.15s ease-out;
+}
+
+/* Keyboard focus must stay visible: the app strips outlines
+   (focus:outline-none) on the textarea and title input with no
+   replacement, so keyboard users lose the caret position entirely. */
+:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+}
+
+/* Respect reduced-motion: smooth typewriter scrolling, spinners and
+   transitions are all disabled for users who asked for it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

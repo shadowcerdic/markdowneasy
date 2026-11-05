@@ -8,7 +8,10 @@ export default defineConfig(() => {
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        // import.meta.dirname, not __dirname: __dirname is undefined in
+        // ESM and Vite's native config loader warns it is unsupported
+        // (it only worked because Vite shimmed it).
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     server: {

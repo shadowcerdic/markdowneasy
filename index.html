@@ -3,6 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Content-Security-Policy: the preview renders user markdown via
+      dangerouslySetInnerHTML, so a policy is the last line of defence.
+      style-src needs 'unsafe-inline' (the app sets inline styles for
+      font sizes) and connect-src allows Vite's dev websocket.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' https: data:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'"
+    />
+    <!-- NOTE: frame-ancestors is intentionally absent here — it is ignored
+      in a <meta> CSP (Chrome warns about it). Real clickjacking
+      protection needs the header set by the host (e.g. Cloudflare
+      Worker): frame-ancestors 'none'. -->
     <title>OmniMark - Premium BiDi Markdown Editor</title>
     <meta name="description" content="A high-performance markdown editor with intelligent auto-direction (RTL/LTR), live synchronized preview, focus mode, and multi-document workspace." />
     <meta property="og:title" content="OmniMark - Premium BiDi Markdown Editor" />
