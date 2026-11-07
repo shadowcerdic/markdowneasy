@@ -23,7 +23,7 @@ import { ExportModal } from './components/ExportModal.tsx';
 import { calculateBidiStats } from './utils/bidi.ts';
 import { computeMarkdownStats } from './utils/markdownStats.ts';
 import { toggleTaskInMarkdown } from './utils/markdownParser.ts';
-import { downloadFile, generateStandaloneHtml, copyRichTextToClipboard } from './utils/exporter.ts';
+import { downloadFile, generateStandaloneHtml, copyRichTextToClipboard, sanitizeFilename } from './utils/exporter.ts';
 
 const STORAGE_KEYS = {
   DOCUMENTS: 'omnimark_documents_v1',
@@ -36,6 +36,12 @@ const STORAGE_KEYS = {
   TARGET_WORDS: 'omnimark_target_words',
   SNAPSHOTS: 'omnimark_snapshots_v1',
 };
+
+// Date.now() alone collides when several documents are created in the same
+// millisecond (e.g. dropping multiple files at once).
+function uniqueId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 /**
  * localStorage is untrusted input: a truncated write, a browser extension,
@@ -318,7 +324,7 @@ export default function App() {
 
   // Document management handlers
   const handleCreateDoc = () => {
-    const newId = `doc-${Date.now()}`;
+    const newId = uniqueId('doc');
     const newDoc: DocumentItem = {
       id: newId,
       title: 'Untitled Document',
@@ -332,7 +338,7 @@ export default function App() {
   const handleDuplicateDoc = (id: string) => {
     const target = documents.find((d) => d.id === id);
     if (!target) return;
-    const newId = `doc-${Date.now()}`;
+    const newId = uniqueId('doc');
     const dupDoc: DocumentItem = {
       ...target,
       id: newId,
@@ -382,7 +388,7 @@ export default function App() {
     reader.onload = (e) => {
       const content = (e.target?.result as string) || '';
       const title = file.name.replace(/\.(md|markdown|txt)$/i, '');
-      const newId = `doc-${Date.now()}`;
+      const newId = uniqueId('doc');
       const newDoc: DocumentItem = {
         id: newId,
         title: title || 'Imported File',
@@ -490,7 +496,7 @@ export default function App() {
     if (existing) {
       setActiveDocId(existing.id);
     } else {
-      const newId = `doc-${Date.now()}`;
+      const newId = uniqueId('doc');
       const newDoc: DocumentItem = {
         id: newId,
         title: targetTitle,
@@ -505,7 +511,7 @@ export default function App() {
   // Revision snapshots handlers
   const handleSaveSnapshot = (name: string) => {
     const newSnapshot: DocumentSnapshot = {
-      id: `snap-${Date.now()}`,
+      id: uniqueId('snap'),
       docId: activeDocId,
       name,
       content: activeDoc.content,
@@ -540,20 +546,44 @@ export default function App() {
   };
 
   // Find and replace operations
-  const handleReplaceCurrent = (findText: string, replaceText: string, caseSensitive: boolean) => {
+  const handleReplaceCurrent = (findText: string, replaceText: string, caseSensitive: boolean, matchIndex: number) => {
     if (!findText) return;
     try {
       const regex = new RegExp(
         findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-        caseSensitive ? '' : 'i'
+        caseSensitive ? 'g' : 'gi'
       );
-      // Replacer function, not a replacement string: a replaceText
-      // containing $&, $' or $` used to inject the matched text.
-      const updated = activeDoc.content.replace(regex, () => replaceText);
-      handleContentChange(updated);
+      // Replace the match the user navigated to, not always the first one.
+      let m: RegExpExecArray | null;
+      let idx = 0;
+      while ((m = regex.exec(activeDoc.content)) !== null) {
+        if (idx === matchIndex) {
+          const updated =
+            activeDoc.content.slice(0, m.index) + replaceText + activeDoc.content.slice(m.index + m[0].length);
+          handleContentChange(updated);
+          return;
+        }
+        idx++;
+      }
     } catch {
       // ignore regex error
     }
+  };
+
+  // Select the current find match in the editor so Next/Prev actually
+  // navigate. In preview-only mode the editor is unmounted; switch to split
+  // first so there is a textarea to select in.
+  const handleNavigateMatch = (start: number, end: number) => {
+    if (viewMode === 'preview') setViewMode('split');
+    setTimeout(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(start, end);
+      const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 24;
+      const line = activeDoc.content.slice(0, start).split('\n').length;
+      textarea.scrollTop = Math.max(0, (line - 3) * lineHeight);
+    }, 0);
   };
 
   const handleReplaceAll = (findText: string, replaceText: string, caseSensitive: boolean) => {
@@ -572,12 +602,12 @@ export default function App() {
 
   // Export handlers
   const handleExportMarkdown = () => {
-    const filename = `${activeDoc.title.replace(/[^\w\s-]/gi, '_') || 'document'}.md`;
+    const filename = `${sanitizeFilename(activeDoc.title)}.md`;
     downloadFile(filename, activeDoc.content, 'text/markdown;charset=utf-8');
   };
 
   const handleExportHtml = () => {
-    const filename = `${activeDoc.title.replace(/[^\w\s-]/gi, '_') || 'document'}.html`;
+    const filename = `${sanitizeFilename(activeDoc.title)}.html`;
     const html = generateStandaloneHtml(activeDoc.title, activeDoc.content, theme);
     downloadFile(filename, html, 'text/html;charset=utf-8');
   };
@@ -745,7 +775,7 @@ export default function App() {
           content={activeDoc.content}
           onReplaceCurrent={handleReplaceCurrent}
           onReplaceAll={handleReplaceAll}
-          onHighlightMatches={() => {}}
+          onNavigateMatch={handleNavigateMatch}
         />
 
         {/* Save / import failure banner. Previously a failed write only

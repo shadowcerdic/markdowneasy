@@ -60,6 +60,26 @@ function safeLanguage(rawLang: string): string {
 }
 
 /**
+ * Emphasis passes (highlight, bold, italic, strikethrough, superscript).
+ * Shared by parseInlineMarkdown and link labels: a label is stashed inside
+ * its anchor before the main passes run, so its emphasis must be applied
+ * here first — otherwise [**bold**](url) showed literal asterisks.
+ * Input must already be HTML-escaped; these passes only add tags.
+ */
+function applyInlineEmphasis(text: string): string {
+  return text
+    .replace(/==([^=]+)==/g, '<mark class="bg-amber-400/25 text-amber-200 px-1 py-0.5 rounded border-b border-amber-400/50">$1</mark>')
+    .replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/___([^_]+)___/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-neutral-100">$1</strong>')
+    .replace(/__([^_]+)__/g, '<strong class="font-semibold text-neutral-100">$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em class="italic text-neutral-200">$1</em>')
+    .replace(/_([^_]+)_/g, '<em class="italic text-neutral-200">$1</em>')
+    .replace(/~~([^~]+)~~/g, '<del class="line-through text-neutral-400">$1</del>')
+    .replace(/\^([^^]+)\^/g, '<sup class="text-[0.75em] text-neutral-300">$1</sup>');
+}
+
+/**
  * Links & images with balanced-paren destinations. A naive `\(([^)]+)\)`
  * stops at the FIRST ")" — so a legit Wikipedia URL with parens, or a
  * hostile `data:text/html,<script>alert(1)</script>` URL, left a visible
@@ -111,7 +131,7 @@ function replaceLinksAndImages(text: string, stash: (html: string) => string): s
     } else {
       out += text.slice(i, open);
       out += stash(
-        `<a href="${safeUrl(url)}" target="_blank" rel="noopener noreferrer" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-4 font-medium transition-colors">${label}</a>`
+        `<a href="${safeUrl(url)}" target="_blank" rel="noopener noreferrer" class="text-indigo-400 hover:text-indigo-300 underline underline-offset-4 font-medium transition-colors">${applyInlineEmphasis(label)}</a>`
       );
     }
     i = j;
@@ -154,26 +174,8 @@ export function parseInlineMarkdown(text: string): string {
   // (see safeUrl) and destinations parsed with balanced parens.
   result = replaceLinksAndImages(result, stash);
 
-  // Highlight: ==text==
-  result = result.replace(/==([^=]+)==/g, '<mark class="bg-amber-400/25 text-amber-200 px-1 py-0.5 rounded border-b border-amber-400/50">$1</mark>');
-
-  // Bold & Italic: ***text*** or ___text___
-  result = result.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
-  result = result.replace(/___([^_]+)___/g, '<strong><em>$1</em></strong>');
-
-  // Bold: **text** or __text__
-  result = result.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-neutral-100">$1</strong>');
-  result = result.replace(/__([^_]+)__/g, '<strong class="font-semibold text-neutral-100">$1</strong>');
-
-  // Italic: *text* or _text_
-  result = result.replace(/\*([^*]+)\*/g, '<em class="italic text-neutral-200">$1</em>');
-  result = result.replace(/_([^_]+)_/g, '<em class="italic text-neutral-200">$1</em>');
-
-  // Strikethrough: ~~text~~
-  result = result.replace(/~~([^~]+)~~/g, '<del class="line-through text-neutral-400">$1</del>');
-
-  // Superscript: ^text^
-  result = result.replace(/\^([^^]+)\^/g, '<sup class="text-[0.75em] text-neutral-300">$1</sup>');
+  // Highlight, bold, italic, strikethrough, superscript
+  result = applyInlineEmphasis(result);
 
   // Wiki Links: [[Target]] or [[Target|Label]]
   result = result.replace(/\[\[([^\]]+)\]\]/g, (_match, inner) => {
@@ -208,6 +210,68 @@ function resolveBlockDirection(rawText: string, globalDirection: 'auto' | 'rtl' 
     return globalDirection;
   }
   return detectMarkdownLineDirection(rawText);
+}
+
+/** A separator row looks like | --- | :--: | ---: | (one cell per column). */
+function isSeparatorRow(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return false;
+  const cells = trimmed.slice(1, -1).split('|');
+  return cells.length > 0 && cells.every(c => /^\s*:?-+:?\s*$/.test(c));
+}
+
+/** A table starts with a | ... | header line followed by a separator row. */
+function isTableStart(lines: string[], i: number): boolean {
+  const trimmed = lines[i].trim();
+  return (
+    trimmed.startsWith('|') &&
+    trimmed.endsWith('|') &&
+    i + 1 < lines.length &&
+    isSeparatorRow(lines[i + 1])
+  );
+}
+
+/**
+ * Splits a table row into cells, honouring \| escapes and backtick code
+ * spans — a naive split('|' ) broke `x|y` and escaped pipes into extra cells.
+ */
+function parseTableRow(rowStr: string): string[] {
+  const inner = rowStr.trim().slice(1, -1);
+  const cells: string[] = [];
+  let current = '';
+  let k = 0;
+  while (k < inner.length) {
+    const ch = inner[k];
+    if (ch === '\\' && inner[k + 1] === '|') {
+      current += '|';
+      k += 2;
+      continue;
+    }
+    if (ch === '`') {
+      let run = 1;
+      while (inner[k + run] === '`') run++;
+      const fence = '`'.repeat(run);
+      const closer = inner.indexOf(fence, k + run);
+      if (closer !== -1) {
+        current += inner.slice(k, closer + run);
+        k = closer + run;
+        continue;
+      }
+      current += fence;
+      k += run;
+      continue;
+    }
+    if (ch === '|') {
+      cells.push(current.trim());
+      current = '';
+      k++;
+      continue;
+    }
+    current += ch;
+    k++;
+  }
+  cells.push(current.trim());
+  return cells;
 }
 
 /**
@@ -294,11 +358,15 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
 
     // Math block ($$ ... $$)
     if (trimmed.startsWith('$$')) {
+      const firstContent = trimmed.slice(2);
       i++;
       const mathLines: string[] = [];
-      if (trimmed.length > 2 && trimmed.endsWith('$$') && trimmed !== '$$') {
-        mathLines.push(trimmed.slice(2, -2).trim());
+      if (firstContent.endsWith('$$')) {
+        const content = firstContent.slice(0, -2).trim();
+        if (content) mathLines.push(content);
       } else {
+        // Content on the opening $$ line is part of the equation too.
+        if (firstContent.trim()) mathLines.push(firstContent);
         while (i < lines.length && !lines[i].trim().endsWith('$$')) {
           mathLines.push(lines[i]);
           i++;
@@ -428,64 +496,59 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
     }
 
     // Markdown Table (| Col 1 | Col 2 |)
-    if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+    // A table only starts when the NEXT line is a separator row (| --- | :--: |).
+    // Without this check a lone "| text |" line was consumed but never rendered
+    // (vanished from the preview), and a separator-less two-line table silently
+    // ate its first data row as the "separator".
+    if (isTableStart(lines, i)) {
       const tableLines: string[] = [];
       while (i < lines.length && lines[i].trim().startsWith('|') && lines[i].trim().endsWith('|')) {
         tableLines.push(lines[i].trim());
         i++;
       }
 
-      if (tableLines.length >= 2) {
-        const headerRow = tableLines[0];
-        const separatorRow = tableLines[1];
-        const dataRows = tableLines.slice(2);
+      const headerRow = tableLines[0];
+      const separatorRow = tableLines[1];
+      const dataRows = tableLines.slice(2);
 
-        const parseRow = (rowStr: string) => {
-          return rowStr
-            .slice(1, -1)
-            .split('|')
-            .map(c => c.trim());
-        };
+      const headers = parseTableRow(headerRow);
+      const alignments = parseTableRow(separatorRow).map(sep => {
+        const left = sep.startsWith(':');
+        const right = sep.endsWith(':');
+        if (left && right) return 'center';
+        if (right) return 'right';
+        return 'left';
+      });
 
-        const headers = parseRow(headerRow);
-        const alignments = parseRow(separatorRow).map(sep => {
-          const left = sep.startsWith(':');
-          const right = sep.endsWith(':');
-          if (left && right) return 'center';
-          if (right) return 'right';
-          return 'left';
-        });
+      // Table direction check
+      const tableText = tableLines.join(' ');
+      const tableDir = resolveBlockDirection(tableText, globalDir);
 
-        // Table direction check
-        const tableText = tableLines.join(' ');
-        const tableDir = resolveBlockDirection(tableText, globalDir);
+      let tableHtml = `<div class="my-6 overflow-x-auto rounded-xl border border-neutral-800 shadow-sm" dir="${tableDir}">`;
+      tableHtml += `<table class="w-full text-sm text-neutral-200">`;
+      tableHtml += `<thead class="bg-neutral-900 border-b border-neutral-800 text-xs font-semibold uppercase tracking-wider text-neutral-400"><tr>`;
 
-        let tableHtml = `<div class="my-6 overflow-x-auto rounded-xl border border-neutral-800 shadow-sm" dir="${tableDir}">`;
-        tableHtml += `<table class="w-full text-sm text-neutral-200">`;
-        tableHtml += `<thead class="bg-neutral-900 border-b border-neutral-800 text-xs font-semibold uppercase tracking-wider text-neutral-400"><tr>`;
+      headers.forEach((h, idx) => {
+        const align = alignments[idx] || 'left';
+        const alignClass = align === 'center' ? 'text-center' : (align === 'right' ? 'text-right' : 'text-left');
+        tableHtml += `<th dir="${detectDirection(h)}" class="px-4 py-3 ${alignClass}">${parseInlineMarkdown(h)}</th>`;
+      });
+      tableHtml += `</tr></thead><tbody class="divide-y divide-neutral-800/60 bg-neutral-950/50">`;
 
-        headers.forEach((h, idx) => {
+      dataRows.forEach((r, rowIdx) => {
+        const cells = parseTableRow(r);
+        tableHtml += `<tr class="${rowIdx % 2 === 1 ? 'bg-neutral-900/30' : ''} hover:bg-neutral-900/60 transition-colors">`;
+        cells.forEach((cell, idx) => {
           const align = alignments[idx] || 'left';
           const alignClass = align === 'center' ? 'text-center' : (align === 'right' ? 'text-right' : 'text-left');
-          tableHtml += `<th dir="${detectDirection(h)}" class="px-4 py-3 ${alignClass}">${parseInlineMarkdown(h)}</th>`;
+          tableHtml += `<td dir="${detectDirection(cell)}" class="px-4 py-3 ${alignClass}">${parseInlineMarkdown(cell)}</td>`;
         });
-        tableHtml += `</tr></thead><tbody class="divide-y divide-neutral-800/60 bg-neutral-950/50">`;
+        tableHtml += `</tr>`;
+      });
 
-        dataRows.forEach((r, rowIdx) => {
-          const cells = parseRow(r);
-          tableHtml += `<tr class="${rowIdx % 2 === 1 ? 'bg-neutral-900/30' : ''} hover:bg-neutral-900/60 transition-colors">`;
-          cells.forEach((cell, idx) => {
-            const align = alignments[idx] || 'left';
-            const alignClass = align === 'center' ? 'text-center' : (align === 'right' ? 'text-right' : 'text-left');
-            tableHtml += `<td dir="${detectDirection(cell)}" class="px-4 py-3 ${alignClass}">${parseInlineMarkdown(cell)}</td>`;
-          });
-          tableHtml += `</tr>`;
-        });
-
-        tableHtml += `</tbody></table></div>`;
-        htmlBlocks.push(tableHtml);
-        continue;
-      }
+      tableHtml += `</tbody></table></div>`;
+      htmlBlocks.push(tableHtml);
+      continue;
     }
 
     // Task List Items (- [ ] or - [x]) — consecutive tasks are grouped
@@ -580,7 +643,7 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
       !lines[i].trim().startsWith('```') &&
       !lines[i].trim().startsWith('~~~') &&
       !lines[i].trim().startsWith('>') &&
-      !lines[i].trim().startsWith('|') &&
+      !isTableStart(lines, i) &&
       !lines[i].trim().startsWith('$$') &&
       !/^(\*{3,}|-{3,}|_{3,})$/.test(lines[i].trim()) &&
       !/^(\s*)[-*+]\s*\[[ xX]\]/.test(lines[i]) &&
@@ -606,17 +669,52 @@ export function parseMarkdownToHtml(markdown: string, options: ParseOptions = {}
 }
 
 /**
- * Helper to toggle a task checkbox in raw markdown text by its sequential task index
+ * Helper to toggle a task checkbox in raw markdown text by its sequential task index.
+ * Must count tasks exactly like parseMarkdownToHtml does: task-looking lines
+ * inside fenced code blocks or math blocks are content, not tasks, and counting
+ * them here would toggle the wrong line (silent document corruption).
  */
 export function toggleTaskInMarkdown(markdown: string, targetTaskIndex: number): string {
+  // Split with captured separators so the document's original line endings
+  // (CRLF included) survive the round-trip untouched.
+  const parts = markdown.split(/(\r\n|\r|\n)/);
   let currentIndex = 0;
-  return markdown.replace(/^(\s*[-*+]\s*\[)([ xX])(\]\s*.*)$/gm, (match, prefix, checkChar, rest) => {
-    if (currentIndex === targetTaskIndex) {
-      const newCheck = checkChar.toLowerCase() === 'x' ? ' ' : 'x';
-      currentIndex++;
-      return `${prefix}${newCheck}${rest}`;
+  let fenceMarker: string | null = null;
+  let inMathBlock = false;
+
+  for (let i = 0; i < parts.length; i += 2) {
+    const trimmed = parts[i].trim();
+
+    if (fenceMarker !== null) {
+      if (trimmed.startsWith(fenceMarker)) fenceMarker = null;
+      continue;
     }
-    currentIndex++;
-    return match;
-  });
+    if (inMathBlock) {
+      if (trimmed.endsWith('$$')) inMathBlock = false;
+      continue;
+    }
+
+    const fenceMatch = trimmed.match(/^(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      fenceMarker = fenceMatch[1];
+      continue;
+    }
+    if (trimmed.startsWith('$$')) {
+      // Single-line $$...$$ stays on this line; otherwise the block runs
+      // until a line ending with $$ (mirrors the parser).
+      if (!(trimmed.length > 2 && trimmed.endsWith('$$'))) inMathBlock = true;
+      continue;
+    }
+
+    const taskMatch = parts[i].match(/^(\s*[-*+]\s*\[)([ xX])(\]\s*.*)$/);
+    if (taskMatch) {
+      if (currentIndex === targetTaskIndex) {
+        const newCheck = taskMatch[2].toLowerCase() === 'x' ? ' ' : 'x';
+        parts[i] = `${taskMatch[1]}${newCheck}${taskMatch[3]}`;
+      }
+      currentIndex++;
+    }
+  }
+
+  return parts.join('');
 }

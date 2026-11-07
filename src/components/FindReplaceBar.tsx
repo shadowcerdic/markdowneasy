@@ -5,9 +5,9 @@ interface FindReplaceBarProps {
   isOpen: boolean;
   onClose: () => void;
   content: string;
-  onReplaceCurrent: (findText: string, replaceText: string, caseSensitive: boolean) => void;
+  onReplaceCurrent: (findText: string, replaceText: string, caseSensitive: boolean, matchIndex: number) => void;
   onReplaceAll: (findText: string, replaceText: string, caseSensitive: boolean) => void;
-  onHighlightMatches: (findText: string, caseSensitive: boolean) => void;
+  onNavigateMatch: (start: number, end: number) => void;
 }
 
 export const FindReplaceBar: React.FC<FindReplaceBarProps> = ({
@@ -16,7 +16,7 @@ export const FindReplaceBar: React.FC<FindReplaceBarProps> = ({
   content,
   onReplaceCurrent,
   onReplaceAll,
-  onHighlightMatches,
+  onNavigateMatch,
 }) => {
   const [findText, setFindText] = useState('');
   const [replaceText, setReplaceText] = useState('');
@@ -25,35 +25,47 @@ export const FindReplaceBar: React.FC<FindReplaceBarProps> = ({
 
   if (!isOpen) return null;
 
-  // Calculate matches count
-  let matchCount = 0;
+  // Match positions, not just a count: Next/Prev select the actual match in
+  // the editor and Replace targets that match — previously the counter was
+  // cosmetic and Replace always hit the first occurrence in the document.
+  const matches: { start: number; end: number }[] = [];
   if (findText.trim()) {
     try {
       const regex = new RegExp(
         findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
         caseSensitive ? 'g' : 'gi'
       );
-      const matches = content.match(regex);
-      matchCount = matches ? matches.length : 0;
+      let m: RegExpExecArray | null;
+      while ((m = regex.exec(content)) !== null) {
+        matches.push({ start: m.index, end: m.index + m[0].length });
+      }
     } catch {
-      matchCount = 0;
+      // invalid pattern: no matches
     }
   }
+  const matchCount = matches.length;
+  // After a replace shrinks the match list, clamp instead of pointing past the end.
+  const effectiveIndex = matchCount === 0 ? 0 : Math.min(Math.max(currentIndex, 1), matchCount);
 
   const handleFindChange = (val: string) => {
     setFindText(val);
     setCurrentIndex(val ? 1 : 0);
-    onHighlightMatches(val, caseSensitive);
+  };
+
+  const goToMatch = (index1: number) => {
+    setCurrentIndex(index1);
+    const m = matches[index1 - 1];
+    if (m) onNavigateMatch(m.start, m.end);
   };
 
   const handleNext = () => {
     if (matchCount === 0) return;
-    setCurrentIndex((prev) => (prev >= matchCount ? 1 : prev + 1));
+    goToMatch(effectiveIndex >= matchCount ? 1 : effectiveIndex + 1);
   };
 
   const handlePrev = () => {
     if (matchCount === 0) return;
-    setCurrentIndex((prev) => (prev <= 1 ? matchCount : prev - 1));
+    goToMatch(effectiveIndex <= 1 ? matchCount : effectiveIndex - 1);
   };
 
   return (
@@ -66,12 +78,19 @@ export const FindReplaceBar: React.FC<FindReplaceBarProps> = ({
           placeholder="Find in document..."
           value={findText}
           onChange={(e) => handleFindChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              if (e.shiftKey) handlePrev();
+              else handleNext();
+            }
+          }}
           className="bg-transparent text-xs text-white placeholder-neutral-500 focus:outline-none w-full"
           autoFocus
         />
         {findText && (
           <span className="text-[10px] text-neutral-400 font-mono shrink-0 pl-1">
-            {matchCount > 0 ? `${currentIndex}/${matchCount}` : 'No matches'}
+            {matchCount > 0 ? `${effectiveIndex}/${matchCount}` : 'No matches'}
           </span>
         )}
       </div>
@@ -112,7 +131,7 @@ export const FindReplaceBar: React.FC<FindReplaceBarProps> = ({
       {/* Action buttons */}
       <div className="flex items-center gap-1.5">
         <button
-          onClick={() => onReplaceCurrent(findText, replaceText, caseSensitive)}
+          onClick={() => onReplaceCurrent(findText, replaceText, caseSensitive, effectiveIndex - 1)}
           disabled={matchCount === 0}
           className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 disabled:opacity-40 transition-colors"
         >
@@ -136,7 +155,7 @@ export const FindReplaceBar: React.FC<FindReplaceBarProps> = ({
           checked={caseSensitive}
           onChange={(e) => {
             setCaseSensitive(e.target.checked);
-            onHighlightMatches(findText, e.target.checked);
+            setCurrentIndex(1);
           }}
           className="rounded bg-neutral-800 border-neutral-700 text-indigo-500"
         />

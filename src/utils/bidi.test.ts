@@ -245,3 +245,92 @@ test('parseMarkdownToHtml: consecutive tasks form one list', () => {
   assert.ok(html.includes('data-task-index="0"'));
   assert.ok(html.includes('data-task-index="2"'));
 });
+
+// --- Regression tests for the 2026-11-07 review fixes ---
+
+test('toggleTaskInMarkdown: task-looking lines inside code fences are not tasks', () => {
+  const doc = '```\n- [ ] fake task in code\n```\n\n- [ ] real task one\n- [x] real task two';
+  const toggled = toggleTaskInMarkdown(doc, 0);
+  assert.ok(toggled.includes('- [ ] fake task in code'), 'code content untouched');
+  assert.ok(toggled.includes('- [x] real task one'), 'first real task toggled');
+  assert.ok(toggled.includes('- [x] real task two'), 'second task untouched');
+
+  const tilde = '~~~\n- [ ] fake\n~~~\n- [ ] real';
+  assert.ok(toggleTaskInMarkdown(tilde, 0).includes('- [ ] fake'));
+  assert.ok(toggleTaskInMarkdown(tilde, 0).includes('- [x] real'));
+});
+
+test('toggleTaskInMarkdown: task-looking lines inside math blocks are not tasks', () => {
+  const doc = '$$\n- [ ] fake math line\n$$\n\n- [ ] real task';
+  const toggled = toggleTaskInMarkdown(doc, 0);
+  assert.ok(toggled.includes('- [ ] fake math line'));
+  assert.ok(toggled.includes('- [x] real task'));
+
+  const singleLine = '$$ - [ ] fake $$\n- [ ] real';
+  assert.ok(toggleTaskInMarkdown(singleLine, 0).includes('$$ - [ ] fake $$'));
+  assert.ok(toggleTaskInMarkdown(singleLine, 0).includes('- [x] real'));
+});
+
+test('toggleTaskInMarkdown: preserves CRLF line endings', () => {
+  const doc = '- [ ] one\r\n- [x] two\r\n';
+  assert.equal(toggleTaskInMarkdown(doc, 0), '- [x] one\r\n- [x] two\r\n');
+});
+
+test('parseMarkdownToHtml: a lone | line is rendered, not swallowed', () => {
+  const html = parseMarkdownToHtml('BEFORE\n\n| just a pipe line |\n\nAFTER');
+  assert.ok(html.includes('just a pipe line'));
+  assert.ok(html.includes('BEFORE'));
+  assert.ok(html.includes('AFTER'));
+});
+
+test('parseMarkdownToHtml: table without a separator row keeps all its lines', () => {
+  const html = parseMarkdownToHtml('| a | b |\n| real data | more data |');
+  assert.ok(html.includes('real data'), 'second line must not be eaten as a separator');
+  assert.ok(html.includes('more data'));
+  assert.ok(!html.includes('<table'), 'not a valid table');
+});
+
+test('parseMarkdownToHtml: valid tables still parse with alignments', () => {
+  const html = parseMarkdownToHtml('| a | b |\n| :--- | ---: |\n| x | y |');
+  assert.ok(html.includes('<table'));
+  assert.ok(html.includes('text-left'));
+  assert.ok(html.includes('text-right'));
+  assert.equal((html.match(/<td/g) || []).length, 2);
+});
+
+test('parseMarkdownToHtml: escaped pipes and code-span pipes do not split cells', () => {
+  const html = parseMarkdownToHtml('| a | b |\n| --- | --- |\n| `x|y` | z\\|w |');
+  assert.equal((html.match(/<td/g) || []).length, 2);
+  assert.ok(html.includes('x|y'));
+  assert.ok(html.includes('z|w'));
+});
+
+test('parseMarkdownToHtml: content on the opening $$ line is kept', () => {
+  const html = parseMarkdownToHtml('$$E = mc^2\nx + y = z\n$$');
+  assert.ok(html.includes('E = mc^2'));
+  assert.ok(html.includes('x + y = z'));
+
+  const single = parseMarkdownToHtml('$$a^2 + b^2 = c^2$$');
+  assert.ok(single.includes('a^2 + b^2 = c^2'));
+
+  const bare = parseMarkdownToHtml('$$\nonly line\n$$');
+  assert.ok(bare.includes('only line'));
+});
+
+test('parseMarkdownToHtml: emphasis inside link labels renders', () => {
+  const html = parseMarkdownToHtml('[**bold label**](https://example.com)');
+  assert.ok(html.includes('<strong class="font-semibold text-neutral-100">bold label</strong>'));
+  assert.ok(!html.includes('**bold label**'));
+  assert.ok(html.includes('href="https://example.com"'));
+
+  const italic = parseMarkdownToHtml('[*slanted* and _under_](https://example.com)');
+  assert.ok(italic.includes('<em class="italic text-neutral-200">slanted</em>'));
+  assert.ok(italic.includes('<em class="italic text-neutral-200">under</em>'));
+});
+
+test('sanitizeFilename: Persian titles fall back to a dated ASCII name', async () => {
+  const { sanitizeFilename } = await import('./exporter.ts');
+  assert.equal(sanitizeFilename('سلام دنیا'), `document-${new Date().toISOString().slice(0, 10)}`);
+  assert.equal(sanitizeFilename('گزارش Report 1404'), 'Report_1404');
+  assert.equal(sanitizeFilename('  '), `document-${new Date().toISOString().slice(0, 10)}`);
+});
